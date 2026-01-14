@@ -1,0 +1,7 @@
+name = "sun-cal"
+main = "src/index.ts"
+compatibility_date = "2024-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+# OPENUV_API_KEY is set via: wrangler secret put OPENUV_API_KEY

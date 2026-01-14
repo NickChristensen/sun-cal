@@ -1,0 +1,427 @@
+{
+  "name": "☀️ Sun Cal",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "sun-cal.ics",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1440,
+        -376
+      ],
+      "id": "418230b1-0893-4c6e-8735-c0d7d272a87a",
+      "name": "Webhook",
+      "webhookId": "fc837812-243a-42bc-a67d-0dfcc59fffc3",
+      "alwaysOutputData": false,
+      "notesInFlow": true,
+      "notes": "This would be cooler if it took other forms of location: zip code, street address, etc. I'd have to convert to lat/long/height with [Google Geocoding API](https://developers.google.com/maps/documentation/geocoding/overview)"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.ics }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1024,
+        -376
+      ],
+      "id": "f2c3a430-208e-4305-852d-62fa2e3ea5eb",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "url": "https://api.openuv.io/api/v1/forecast",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "lat",
+              "value": "={{ $('Webhook').item.json.query.latitude }}"
+            },
+            {
+              "name": "lng",
+              "value": "={{ $('Webhook').item.json.query.longitude }}"
+            },
+            {
+              "name": "alt",
+              "value": "={{ $('Webhook').item.json.query.height }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -768,
+        -208
+      ],
+      "id": "72987d88-00db-47f5-956f-01a163604138",
+      "name": "openuv.io UV Index Forecast (12 hours)",
+      "notesInFlow": true,
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "3vZNCGOhpzKT8oYB",
+          "name": "openuv.io"
+        }
+      },
+      "notes": "https://www.openuv.io/dashboard"
+    },
+    {
+      "parameters": {
+        "operation": "setValue",
+        "key": "=uv-forecast-{{ $('Webhook').item.json.query.latitude }}-{{ $('Webhook').item.json.query.longitude }}",
+        "val": "={{ $json.result }}",
+        "ttl": 1800
+      },
+      "type": "@telepilotco/n8n-nodes-kv-storage.kvStorage",
+      "typeVersion": 1,
+      "position": [
+        -544,
+        -208
+      ],
+      "id": "bb9bb1ca-0c22-4c79-9728-aee45c594981",
+      "name": "Set uv-forecast"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "val[0]",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        -320,
+        -280
+      ],
+      "id": "fa528153-74f6-417a-bb5a-6ecfc5213f45",
+      "name": "Split Out"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={\n  \"hour\": {{ DateTime.fromISO($json.uv_time).startOf('hour').toUTC() }}\n}",
+        "includeOtherFields": true,
+        "include": "except",
+        "excludeFields": "sun_position, uv_time",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -96,
+        -280
+      ],
+      "id": "c6775159-0bc4-4680-8d1a-5eb70808eb47",
+      "name": "uv_time → startOf('hour')"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "2708f4ab-7a9d-4328-a9ae-7ec24479438f",
+              "leftValue": "={{ $json.uv }}",
+              "rightValue": "={{ $('Webhook').item.json.query[\"min-uv\"].toNumber() }}",
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        128,
+        -280
+      ],
+      "id": "d88a9ae5-905a-4d31-aae7-e349744366c4",
+      "name": "> min_uv"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        576,
+        -376
+      ],
+      "id": "8ae9f858-86d3-48ac-aa10-2ec4fdc22a81",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "key": "=uv-forecast-{{ $('Webhook').item.json.query.latitude }}-{{ $('Webhook').item.json.query.longitude }}"
+      },
+      "type": "@telepilotco/n8n-nodes-kv-storage.kvStorage",
+      "typeVersion": 1,
+      "position": [
+        -1216,
+        -280
+      ],
+      "id": "36ed82f9-513e-4ce6-8ab4-f234df800bad",
+      "name": "Get cached uv-forecast"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0437e903-647d-4369-9c74-c46491e805a3",
+              "leftValue": "={{ $json.val }}",
+              "rightValue": "",
+              "operator": {
+                "type": "array",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -992,
+        -280
+      ],
+      "id": "56df51fa-58e4-4da0-8a53-028246b59170",
+      "name": "If cache exists",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "jsCode": "\nfunction createBarChartLine({hour, uv}) {\n  const MIN_UV = $('Webhook').first().json.query[\"min-uv\"];\n  const FIXED_WIDTH_CHARS = {\n    0: \"𝟬\",\n    1: \"𝟭\",\n    2: \"𝟮\",\n    3: \"𝟯\",\n    4: \"𝟰\",\n    5: \"𝟱\",\n    6: \"𝟲\",\n    7: \"𝟳\",\n    8: \"𝟴\",\n    9: \"𝟵\",\n    A: \"𝖺\",\n    P: \"𝗉\",\n    M: \"𝗆\",\n  };\n\n  let formattedHour = DateTime.fromISO(hour).toLocaleString({hour: '2-digit'});\n\n  let fixedWidthTime = formattedHour\n    .replace(\"\\s\", \"\")\n    .split(\"\")\n    .map((char) => FIXED_WIDTH_CHARS[char])\n    .join(\"\");\n\n  let bar = new Array(uv - (MIN_UV - 1)).fill(\"█\").join(\"\");\n\n  return `${fixedWidthTime} ${bar} ${uv}`;\n}\n\nlet roundedValues = $input.all().map(({json}) => ({uv: Math.round(json.uv), hour: json.hour}))\n\nlet maxUV = Math.max( ...roundedValues.map(item => item.uv) );\nlet maxUVTimeRange = roundedValues\n  .filter((item) => item.uv === maxUV)\n\nreturn {\n  summary: `☀️ Peak UV index (${maxUV})`,\n  start: DateTime.min( ...maxUVTimeRange.map(item => DateTime.fromISO(item.hour))).toUTC(),\n  end: DateTime.max( ...maxUVTimeRange.map(item => DateTime.fromISO(item.hour))).plus({hours: 1}).toUTC(),\n  description: roundedValues.map(createBarChartLine).join('\\n'),\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        352,
+        -280
+      ],
+      "id": "f9feae5e-bff1-48e1-b5d2-ebc2275a9aa9",
+      "name": "Generate Peak UV item"
+    },
+    {
+      "parameters": {
+        "jsCode": "var SunCalc = require('suncalc');\n\nlet {latitude, longitude, height} = $('Webhook').first().json.query;\n\nlet dates = [];\n\nfor (let index = -180; index < 180; index++) {  \n  let currentDate = DateTime.utc().plus({ days: index }).toJSDate();\n  let times = SunCalc.getTimes(currentDate, latitude, longitude, height);\n\n  dates.push({\n    summary: \"🌅 Sunrise\",\n    start: times.dawn,\n    end: times.sunriseEnd,\n    description: `Sunrise: ${DateTime.fromJSDate(times.sunrise).toLocaleString(DateTime.TIME_SIMPLE)}`,\n  }, {\n    summary: \"🌇 Sunset\",\n    start: times.sunsetStart,\n    end: times.dusk,\n    description: `Sunset: ${DateTime.fromJSDate(times.sunset).toLocaleString(DateTime.TIME_SIMPLE)}`,\n  });\n}\n\nreturn dates;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        352,
+        -496
+      ],
+      "id": "8b7e92f1-92f3-45d1-9135-b66e5507d4ab",
+      "name": "Generate Sunrise/Sunset items"
+    },
+    {
+      "parameters": {
+        "jsCode": "const { default: ical } = require('ical-generator');\n\n\nconst sunCal = ical({name: \"☀️ Sun\"});\n\nfor (const item of $input.all()) {\n  sunCal.createEvent(item.json);\n}\n\nsunCal.ttl(60 * 30)\n\nreturn {\n  ics: sunCal.toString()\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        -376
+      ],
+      "id": "d02c88ff-9545-4407-95ad-8f09425da821",
+      "name": "Transform to ical feed"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Get cached uv-forecast",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Generate Sunrise/Sunset items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "openuv.io UV Index Forecast (12 hours)": {
+      "main": [
+        [
+          {
+            "node": "Set uv-forecast",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set uv-forecast": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "uv_time → startOf('hour')",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "uv_time → startOf('hour')": {
+      "main": [
+        [
+          {
+            "node": "> min_uv",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "> min_uv": {
+      "main": [
+        [
+          {
+            "node": "Generate Peak UV item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Webhook": {
+      "main": [
+        []
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Transform to ical feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get cached uv-forecast": {
+      "main": [
+        [
+          {
+            "node": "If cache exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If cache exists": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "openuv.io UV Index Forecast (12 hours)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Peak UV item": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Generate Sunrise/Sunset items": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform to ical feed": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "NRaQviA7acPDaQUp"
+  },
+  "versionId": "ed703228-0659-4392-b579-34f9811e3a45",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "c3b60d5cecad474b81a1a6a08cb6fceb90108f73e6ec3c4f062c8076082609a2"
+  },
+  "id": "YfgmOcg4QQvUpAbb",
+  "tags": []
+}
