@@ -2,8 +2,7 @@
 
 An iCal feed with local daily sunrise/sunset and UV index events, deployable to a Cloudflare Worker.
 
-<img width="501" height="463" alt="Calendar example" src="https://github.com/user-attachments/assets/829655e5-610e-4a67-b6f9-b54c313ef926" />
-
+<img width="566" height="503" alt="Calendar example" src="https://github.com/user-attachments/assets/8e236a12-fa63-4c4b-ae98-7b8a7118c77c" />
 
 ## Endpoint
 
