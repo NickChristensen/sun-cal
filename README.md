@@ -1,6 +1,9 @@
 # ☀️ Sun Cal
 
-An ical feed with local daily sunrise/sunset and UV index events, deployable to a Cloudflare Worker.
+An iCal feed with local daily sunrise/sunset and UV index events, deployable to a Cloudflare Worker.
+
+<img width="501" height="463" alt="Calendar example" src="https://github.com/user-attachments/assets/829655e5-610e-4a67-b6f9-b54c313ef926" />
+
 
 ## Endpoint
 
