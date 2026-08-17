@@ -227,6 +227,7 @@ function buildSunEvents(
   tzOffset: number
 ) {
   const events = [] as {
+    id: string;
     summary: string;
     start: Date;
     end: Date;
@@ -239,6 +240,7 @@ function buildSunEvents(
 
     events.push(
       {
+        id: createEventId("sunrise", currentDate),
         summary: "🌅 Sunrise",
         start: times.dawn,
         end: times.sunriseEnd,
@@ -248,6 +250,7 @@ function buildSunEvents(
           .toLocaleString(DateTime.TIME_SIMPLE)}`,
       },
       {
+        id: createEventId("sunset", currentDate),
         summary: "🌇 Sunset",
         start: times.sunsetStart,
         end: times.dusk,
@@ -287,6 +290,7 @@ function buildUvEvent(uvForecast: UvForecastItem[], minUv: number, tzOffset: num
     .toUTC();
 
   return {
+    id: createEventId("peak-uv", start.toJSDate()),
     summary: `☀️ Peak UV index (${maxUv})`,
     start: start.toJSDate(),
     end: end.toJSDate(),
@@ -294,6 +298,10 @@ function buildUvEvent(uvForecast: UvForecastItem[], minUv: number, tzOffset: num
       .map((item) => createBarChartLine(item, minUv, tzOffset))
       .join("\n"),
   };
+}
+
+function createEventId(type: string, date: Date) {
+  return `sun-cal-${type}-${date.toISOString().slice(0, 10)}`;
 }
 
 function createBarChartLine({ hour, uv }: UvHour, minUv: number, tzOffset: number) {
