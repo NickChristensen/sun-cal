@@ -1,0 +1,72 @@
+{
+  "sourceVersion": "6.0.1",
+  "now": "2026-10-16T12:00:00Z",
+  "normalizedSha256": "b492ff828d316ba374516127f3ed725eb895de6a2690a28603762112beed3ca3",
+  "bytes": 143621,
+  "eventCount": 721,
+  "events": [
+    {
+      "index": 0,
+      "UID": "sun-cal-sunrise-2026-04-19",
+      "SEQUENCE": "0",
+      "DTSTART": "20260419T113025Z",
+      "DTEND": "20260419T115754Z",
+      "SUMMARY": "🌅 Sunrise",
+      "DESCRIPTION": "Sunrise: 5:55 AM"
+    },
+    {
+      "index": 1,
+      "UID": "sun-cal-sunset-2026-04-19",
+      "SEQUENCE": "0",
+      "DTSTART": "20260420T010343Z",
+      "DTEND": "20260420T013111Z",
+      "SUMMARY": "🌇 Sunset",
+      "DESCRIPTION": "Sunset: 7:06 PM"
+    },
+    {
+      "index": 358,
+      "UID": "sun-cal-sunrise-2026-10-15",
+      "SEQUENCE": "0",
+      "DTSTART": "20261015T120507Z",
+      "DTEND": "20261015T123148Z",
+      "SUMMARY": "🌅 Sunrise",
+      "DESCRIPTION": "Sunrise: 6:29 AM"
+    },
+    {
+      "index": 359,
+      "UID": "sun-cal-sunset-2026-10-15",
+      "SEQUENCE": "0",
+      "DTSTART": "20261016T000312Z",
+      "DTEND": "20261016T002953Z",
+      "SUMMARY": "🌇 Sunset",
+      "DESCRIPTION": "Sunset: 6:05 PM"
+    },
+    {
+      "index": 718,
+      "UID": "sun-cal-sunrise-2027-04-13",
+      "SEQUENCE": "0",
+      "DTSTART": "20270413T113741Z",
+      "DTEND": "20270413T120450Z",
+      "SUMMARY": "🌅 Sunrise",
+      "DESCRIPTION": "Sunrise: 6:02 AM"
+    },
+    {
+      "index": 719,
+      "UID": "sun-cal-sunset-2027-04-13",
+      "SEQUENCE": "0",
+      "DTSTART": "20270414T005941Z",
+      "DTEND": "20270414T012650Z",
+      "SUMMARY": "🌇 Sunset",
+      "DESCRIPTION": "Sunset: 7:02 PM"
+    },
+    {
+      "index": 720,
+      "UID": "sun-cal-peak-uv-2026-10-16",
+      "SEQUENCE": "0",
+      "DTSTART": "20261016T120000Z",
+      "DTEND": "20261016T140000Z",
+      "SUMMARY": "☀️ Peak UV index (7)",
+      "DESCRIPTION": "𝟬𝟮𝖺𝗆 █ 1\\n𝟬𝟯𝖺𝗆 ███ 3\\n𝟬𝟰𝖺𝗆 ████ 4\\n𝟬𝟱𝖺𝗆 ██████ 6\\n𝟬𝟲𝖺𝗆 ███████ 7\\n𝟬𝟳𝖺𝗆 ███████ 7\\n𝟬𝟴𝖺𝗆 ██████ 6\\n𝟬𝟵𝖺𝗆 ████ 4\\n𝟭𝟬𝖺𝗆 ██ 2"
+    }
+  ]
+}

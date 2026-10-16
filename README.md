@@ -27,6 +27,8 @@ https://<your-subdomain>.workers.dev/sun-cal.ics?latitude=30.48&longitude=-97.65
 
 ## Local development
 
+Use Node.js 22 or 24+ (required by `ical-generator`).
+
 ```
 npm install
 ```
@@ -42,6 +44,20 @@ Run:
 ```
 wrangler dev
 ```
+
+## Tests
+
+```
+npm ci
+npm test
+```
+
+Tests run the Worker in local workerd with the compatibility date and flags from
+`wrangler.toml`. Synthetic UV forecasts populate its local cache; outbound
+requests and Cloudflare metadata lookups are disabled. No API key is needed.
+The calendar baseline was captured with `ical-generator` 6.0.1 at the fixed time
+recorded in `test/fixtures/calendar-baseline.json`; its digest ignores only
+`DTSTAMP` values and protects the complete feed during the serializer upgrade.
 
 ## Deploy
 
