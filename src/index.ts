@@ -17,9 +17,13 @@ type UvHour = {
   hour: DateTime;
 };
 
+type DisplayTimezone =
+  | { mode: "fixed"; offset: number }
+  | { mode: "iana"; zone: string };
+
 const UV_CACHE_TTL_SECONDS = 60 * 30;
 // Bump this namespace when solar calculation, window, or serialization changes.
-const SOLAR_CACHE_VERSION = "v1";
+const SOLAR_CACHE_VERSION = "v2";
 const SOLAR_CACHE_TTL_SECONDS = 60 * 60 * 24;
 const CALENDAR_END = "END:VCALENDAR";
 const UV_MAX_RETRIES = 6;
@@ -83,7 +87,7 @@ export default {
     const longitude = Number(longitudeParam);
     const height = Number(heightParam);
     const minUv = minUvParam === null || minUvParam === "" ? 1 : Number(minUvParam);
-    const tzOffset = tzParam === null || tzParam === "" ? 0 : Number(tzParam);
+    const timezone = parseDisplayTimezone(tzParam);
 
     if (!Number.isFinite(latitude)) {
       return new Response("Invalid latitude", { status: 400 });
@@ -101,7 +105,7 @@ export default {
       return new Response("Invalid min-uv", { status: 400 });
     }
 
-    if (!Number.isFinite(tzOffset)) {
+    if (!timezone) {
       return new Response("Invalid tz", { status: 400 });
     }
 
@@ -117,9 +121,9 @@ export default {
       );
 
       const solarCalendar = await getSolarCalendar(
-        latitude, longitude, height, tzOffset, calendarDay, ctx
+        latitude, longitude, height, timezone, calendarDay, ctx
       );
-      const uvEvent = buildUvEvent(uvForecast, minUv, tzOffset);
+      const uvEvent = buildUvEvent(uvForecast, minUv, timezone);
       // Event.toString() escapes text; foldLines is the public serializer's
       // folding step. Only this dynamic event is rendered on a solar cache hit.
       const uvText = uvEvent ? foldLines(ical().createEvent(uvEvent).toString()) : "";
@@ -141,11 +145,31 @@ export default {
   },
 };
 
+function parseDisplayTimezone(value: string | null): DisplayTimezone | null {
+  // Preserve all finite legacy Number spellings, including whitespace/exponents.
+  const offset = Number(value);
+  if (Number.isFinite(offset)) {
+    return { mode: "fixed", offset };
+  }
+  // Do not admit Intl's bare abbreviations or offset identifiers as IANA names.
+  if (value === null || !(/^UTC$/i.test(value) ||
+      /^[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)+$/.test(value))) {
+    return null;
+  }
+  try {
+    const zone = new Intl.DateTimeFormat("en-US", { timeZone: value })
+      .resolvedOptions().timeZone;
+    return { mode: "iana", zone };
+  } catch {
+    return null;
+  }
+}
+
 async function getSolarCalendar(
   latitude: number,
   longitude: number,
   height: number,
-  tzOffset: number,
+  timezone: DisplayTimezone,
   calendarDay: DateTime,
   ctx: ExecutionContext
 ): Promise<string> {
@@ -155,7 +179,8 @@ async function getSolarCalendar(
   keyUrl.searchParams.set("lat", String(latitude));
   keyUrl.searchParams.set("lng", String(longitude));
   keyUrl.searchParams.set("height", String(height));
-  keyUrl.searchParams.set("tz", String(tzOffset));
+  keyUrl.searchParams.set("tzMode", timezone.mode);
+  keyUrl.searchParams.set("tz", timezone.mode === "fixed" ? String(timezone.offset) : timezone.zone);
   const localeOptions = calendarDay.resolvedLocaleOptions();
   for (const [name, value] of Object.entries(localeOptions)) {
     keyUrl.searchParams.set(name, String(value));
@@ -180,10 +205,16 @@ async function getSolarCalendar(
   }
 
   const calendar = ical({ name: "☀️ Sun" });
-  buildSunEvents(latitude, longitude, height, tzOffset, calendarDay)
-    .forEach((event) => calendar.createEvent(event));
   calendar.ttl(UV_CACHE_TTL_SECONDS);
-  const body = calendar.toString();
+  if (timezone.mode === "iana") {
+    calendar.x("X-WR-TIMEZONE", timezone.zone);
+  }
+  // Serialize calendar properties before adding components. Calendar.timezone()
+  // stays unset so the library keeps every endpoint and DTSTAMP in UTC.
+  const header = calendar.toString();
+  const eventsText = buildSunEvents(latitude, longitude, height, timezone, calendarDay)
+    .map((event) => foldLines(calendar.createEvent(event).toString())).join("");
+  const body = header.slice(0, -CALENDAR_END.length) + eventsText + CALENDAR_END;
 
   try {
     const cached = new Response(body, {
@@ -296,7 +327,7 @@ function buildSunEvents(
   latitude: number,
   longitude: number,
   height: number,
-  tzOffset: number,
+  timezone: DisplayTimezone,
   calendarDay: DateTime
 ) {
   const events = [] as {
@@ -322,20 +353,14 @@ function buildSunEvents(
         summary: "🌅 Sunrise",
         start: times.dawn,
         end: times.sunriseEnd,
-        description: `Sunrise: ${DateTime.fromJSDate(times.sunrise)
-          .toUTC()
-          .plus({ hours: tzOffset })
-          .toLocaleString(DateTime.TIME_SIMPLE)}`,
+        description: `Sunrise: ${formatSunTime(times.sunrise, timezone)}`,
       },
       {
         id: createEventId("sunset", currentDate),
         summary: "🌇 Sunset",
         start: times.sunsetStart,
         end: times.dusk,
-        description: `Sunset: ${DateTime.fromJSDate(times.sunset)
-          .toUTC()
-          .plus({ hours: tzOffset })
-          .toLocaleString(DateTime.TIME_SIMPLE)}`,
+        description: `Sunset: ${formatSunTime(times.sunset, timezone)}`,
       }
     );
   }
@@ -343,7 +368,20 @@ function buildSunEvents(
   return events;
 }
 
-function buildUvEvent(uvForecast: UvForecastItem[], minUv: number, tzOffset: number) {
+function formatSunTime(date: Date, timezone: DisplayTimezone): string {
+  const utc = DateTime.fromJSDate(date).toUTC();
+  if (timezone.mode === "fixed") {
+    return utc.plus({ hours: timezone.offset }).toLocaleString(DateTime.TIME_SIMPLE);
+  }
+  const local = utc.setZone(timezone.zone);
+  return `${local.toLocaleString(DateTime.TIME_SIMPLE)} (${regionalLabel(local, timezone.zone)})`;
+}
+
+function regionalLabel(date: DateTime, zone: string): string {
+  return `${zone}, UTC${date.toFormat("ZZ", { numberingSystem: "latn" })}`;
+}
+
+function buildUvEvent(uvForecast: UvForecastItem[], minUv: number, timezone: DisplayTimezone) {
   const hourlyValues: UvHour[] = uvForecast
     .map((item) => ({
       uv: item.uv,
@@ -373,7 +411,7 @@ function buildUvEvent(uvForecast: UvForecastItem[], minUv: number, tzOffset: num
     start: start.toJSDate(),
     end: end.toJSDate(),
     description: roundedValues
-      .map((item) => createBarChartLine(item, minUv, tzOffset))
+      .map((item) => createBarChartLine(item, minUv, timezone))
       .join("\n"),
   };
 }
@@ -382,10 +420,11 @@ function createEventId(type: string, date: Date) {
   return `sun-cal-${type}-${date.toISOString().slice(0, 10)}`;
 }
 
-function createBarChartLine({ hour, uv }: UvHour, minUv: number, tzOffset: number) {
-  const formattedHour = hour
-    .plus({ hours: tzOffset })
-    .toLocaleString({ hour: "2-digit" });
+function createBarChartLine({ hour, uv }: UvHour, minUv: number, timezone: DisplayTimezone) {
+  const local = timezone.mode === "fixed"
+    ? hour.plus({ hours: timezone.offset }) : hour.setZone(timezone.zone);
+  const formattedHour = local.toLocaleString(timezone.mode === "fixed"
+    ? { hour: "2-digit" } : { hour: "2-digit", minute: "2-digit" });
   const fixedWidthTime = formattedHour
     .replace(/\s+/g, "")
     .split("")
@@ -394,8 +433,8 @@ function createBarChartLine({ hour, uv }: UvHour, minUv: number, tzOffset: numbe
 
   const barLength = Math.max(uv - (minUv - 1), 0);
   const bar = new Array(barLength).fill("█").join("");
-
-  return `${fixedWidthTime} ${bar} ${uv}`;
+  const label = timezone.mode === "iana" ? ` (${regionalLabel(local, timezone.zone)})` : "";
+  return `${fixedWidthTime}${label} ${bar} ${uv}`;
 }
 
 function sleep(ms: number) {
