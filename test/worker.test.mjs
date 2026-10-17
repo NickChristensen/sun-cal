@@ -36,6 +36,19 @@ function withoutStamp(event) {
   return fields;
 }
 
+async function cacheRequest(url = endpoint, headers = {}) {
+  const response = await mf.dispatchFetch(url, {
+    headers: { 'x-test-solar-cache': 'use', ...headers },
+  });
+  const body = await response.text();
+  assert.equal(response.status, 200, body);
+  return {
+    response, body, events: eventsFrom(body),
+    counts: JSON.parse(response.headers.get('x-test-counts')),
+    key: response.headers.get('x-test-solar-key'),
+  };
+}
+
 async function solarEvents(url = endpoint, now = baseline.now, zone = 'UTC') {
   const response = await mf.dispatchFetch(url, {
     headers: { 'x-test-now': now, 'x-test-zone': zone },
@@ -105,29 +118,125 @@ before(async () => {
       loader: 'ts',
       contents: `
         import worker from './src/index.ts';
-        import ical from 'ical-generator';
+        import ical, { ICalCalendar, ICalEvent } from 'ical-generator';
+        import SunCalc from 'suncalc';
         import { Settings } from 'luxon';
         Settings.defaultLocale = 'en-US';
         let clockNow;
         let nextNow;
         let uvClockAdvanced;
+        let solarMode;
+        let counts;
+        let solarKey;
+        let solarTtl;
+        let solarContainsUv;
+        let digestCalls;
+        let hashFailure;
+        const subtlePrototype = Object.getPrototypeOf(crypto.subtle);
+        const originalDigest = subtlePrototype.digest;
+        subtlePrototype.digest = function(...args) {
+          digestCalls += 1;
+          if (hashFailure) return Promise.reject(new Error('Synthetic checksum failure'));
+          return originalDigest.apply(this, args);
+        };
+        const originalSunTimes = SunCalc.getTimes;
+        SunCalc.getTimes = function(...args) {
+          counts.sunCalc += 1;
+          return originalSunTimes.apply(this, args);
+        };
+        const originalCalendarString = ICalCalendar.prototype.toString;
+        ICalCalendar.prototype.toString = function(...args) {
+          counts.calendarSerializations += 1;
+          return originalCalendarString.apply(this, args);
+        };
+        const originalEventString = ICalEvent.prototype.toString;
+        ICalEvent.prototype.toString = function(...args) {
+          counts[this.id().includes('peak-uv') ? 'uvSerializations' : 'solarSerializations'] += 1;
+          return originalEventString.apply(this, args);
+        };
         const cachePrototype = Object.getPrototypeOf(caches.default);
         const originalMatch = cachePrototype.match;
+        const originalPut = cachePrototype.put;
+        const originalDelete = cachePrototype.delete;
         cachePrototype.match = async function(...args) {
-          const cached = await originalMatch.apply(this, args);
           const url = new URL(typeof args[0] === 'string' ? args[0] : args[0].url);
+          if (url.pathname.startsWith('/solar/')) {
+            counts.solarReads += 1;
+            solarKey = url.href;
+            if (solarMode === 'bypass' || solarMode.startsWith('write-')) return undefined;
+            if (solarMode === 'reset') {
+              await originalDelete.call(this, args[0]);
+              return undefined;
+            }
+            if (solarMode === 'read-error') throw new Error('Synthetic cache read failure');
+            if (['corrupt', 'empty', 'body-error'].includes(solarMode)) {
+              const body = solarMode === 'body-error'
+                ? new ReadableStream({ start(controller) { controller.error(new Error('Synthetic body failure')); } })
+                : solarMode === 'empty' ? 'BEGIN:VCALENDAR\\r\\nVERSION:2.0\\r\\nEND:VCALENDAR' : 'truncated calendar';
+              return new Response(body, { headers: { 'X-Sun-Cal-Key': url.href } });
+            }
+          }
+          const cached = await originalMatch.apply(this, args);
+          if (url.pathname.startsWith('/solar/') && cached && ['wrong-key', 'missing-key', 'bad-status'].includes(solarMode)) {
+            const headers = new Headers(cached.headers);
+            if (solarMode === 'wrong-key') headers.set('X-Sun-Cal-Key', 'wrong-key');
+            if (solarMode === 'missing-key') headers.delete('X-Sun-Cal-Key');
+            return new Response(cached.body, { status: solarMode === 'bad-status' ? 503 : cached.status, headers });
+          }
+          if (url.pathname.startsWith('/solar/') && cached &&
+              ['broken-interior', 'nested', 'tampered', 'missing-hash', 'wrong-hash'].includes(solarMode)) {
+            const headers = new Headers(cached.headers);
+            let body = await cached.text();
+            if (solarMode === 'broken-interior') {
+              body = 'BEGIN:VCALENDAR\\r\\nVERSION:2.0\\r\\nBEGIN:VEVENT\\r\\nEND:VEVENT\\r\\nEND:VCALENDAR';
+            }
+            if (solarMode === 'nested') {
+              body = body.replace('BEGIN:VEVENT\\r\\n',
+                'BEGIN:VCALENDAR\\r\\nVERSION:2.0\\r\\nEND:VCALENDAR\\r\\nBEGIN:VEVENT\\r\\n');
+            }
+            if (solarMode === 'tampered') body = body.replace('SUMMARY:🌅 Sunrise', 'SUMMARY:🌅 Altered sunrise');
+            if (solarMode === 'missing-hash') headers.delete('X-Sun-Cal-SHA256');
+            if (solarMode === 'wrong-hash') headers.set('X-Sun-Cal-SHA256', '0'.repeat(64));
+            return new Response(body, { status: cached.status, headers });
+          }
           if (nextNow && url.hostname === 'cache.sun-cal' && url.pathname === '/uv') {
             clockNow = Date.parse(nextNow);
             nextNow = null;
             uvClockAdvanced = true;
           }
+          if (url.pathname === '/uv') counts.uvReads += 1;
           return cached;
         };
+        cachePrototype.put = function(key, response) {
+          const url = new URL(typeof key === 'string' ? key : key.url);
+          if (!url.pathname.startsWith('/solar/')) return originalPut.call(this, key, response);
+          counts.solarWrites += 1;
+          solarKey = url.href;
+          solarTtl = response.headers.get('Cache-Control');
+          if (solarMode === 'bypass') return Promise.resolve();
+          if (solarMode === 'write-sync-error') throw new Error('Synthetic synchronous write failure');
+          if (solarMode === 'write-error') return Promise.reject(new Error('Synthetic rejected write'));
+          return (async () => {
+            solarContainsUv = (await response.clone().text()).includes('peak-uv');
+            await originalPut.call(this, key, response);
+          })();
+        };
         export default { async fetch(request, env, ctx) {
+          solarMode = request.headers.get('x-test-solar-cache') || 'bypass';
+          counts = { sunCalc: 0, solarSerializations: 0, uvSerializations: 0,
+            calendarSerializations: 0, solarReads: 0, solarWrites: 0, uvReads: 0 };
+          solarKey = '';
+          solarTtl = '';
+          solarContainsUv = false;
+          digestCalls = 0;
+          hashFailure = request.headers.has('x-test-hash-failure');
           clockNow = Date.parse(request.headers.get('x-test-now') || ${JSON.stringify(baseline.now)});
           nextNow = request.headers.get('x-test-next-now');
           uvClockAdvanced = false;
           Settings.now = () => clockNow;
+          Settings.defaultLocale = request.headers.get('x-test-locale') || 'en-US';
+          Settings.defaultNumberingSystem = request.headers.get('x-test-numbering-system');
+          Settings.defaultOutputCalendar = request.headers.get('x-test-output-calendar');
           Settings.defaultZone = request.headers.get('x-test-zone') || 'UTC';
           if (new URL(request.url).pathname === '/__serializer') {
             const calendar = ical({ name: 'Escaping test' });
@@ -141,8 +250,9 @@ before(async () => {
             return new Response(calendar.toString());
           }
           const shape = request.headers.get('x-test-fixture');
-          const fixture = shape === 'empty' ? [] : shape === 'envelope'
-            ? { result: ${JSON.stringify(forecast)} } : ${JSON.stringify(forecast)};
+          const forecast = ${JSON.stringify(forecast)};
+          const fixture = shape === 'empty' ? [] : shape === 'envelope' ? { result: forecast }
+            : shape === 'changed' ? forecast.map(item => ({ ...item, uv: item.uv + 1 })) : forecast;
           const params = new URL(request.url).searchParams;
           const cacheKey = 'https://cache.sun-cal/uv?lat=' + encodeURIComponent(params.get('latitude'))
             + '&lng=' + encodeURIComponent(params.get('longitude'))
@@ -151,7 +261,16 @@ before(async () => {
             shape === 'invalid-json' ? '{' : JSON.stringify(fixture),
             { headers: { 'Cache-Control': 'max-age=1800' } }
           ));
-          const response = await worker.fetch(request, env, ctx);
+          const pending = [];
+          const response = await worker.fetch(request, env, {
+            waitUntil(promise) { pending.push(promise); ctx.waitUntil(promise); },
+          });
+          await Promise.all(pending);
+          response.headers.set('x-test-counts', JSON.stringify(counts));
+          response.headers.set('x-test-solar-key', solarKey);
+          response.headers.set('x-test-solar-ttl', solarTtl);
+          response.headers.set('x-test-solar-contains-uv', String(solarContainsUv));
+          response.headers.set('x-test-digest-calls', String(digestCalls));
           if (request.headers.has('x-test-next-now')) {
             response.headers.set('x-test-uv-clock-advanced', String(uvClockAdvanced));
           }
@@ -350,4 +469,162 @@ test('malformed UV cache JSON remains a calendar build error', async () => {
   const response = await mf.dispatchFetch(endpoint, { headers: { 'x-test-fixture': 'invalid-json' } });
   assert.equal(response.status, 502);
   assert.match(await response.text(), /^Failed to build calendar: /);
+});
+
+test('a solar cache hit bypasses astronomy and all solar serialization while preserving the complete feed', async () => {
+  const miss = await cacheRequest(endpoint, { 'x-test-solar-cache': 'reset' });
+  assert.deepEqual(miss.counts, {
+    sunCalc: 360, solarSerializations: 720, uvSerializations: 1,
+    calendarSerializations: 1, solarReads: 1, solarWrites: 1, uvReads: 1,
+  });
+  assert.equal(miss.response.headers.get('x-test-solar-ttl'), 'max-age=86400');
+  assert.equal(miss.response.headers.get('x-test-solar-contains-uv'), 'false');
+  const hit = await cacheRequest();
+  assert.deepEqual(hit.counts, {
+    sunCalc: 0, solarSerializations: 0, uvSerializations: 1,
+    calendarSerializations: 0, solarReads: 1, solarWrites: 0, uvReads: 1,
+  });
+  assert.equal(hit.key, miss.key);
+  assert.equal(hit.response.headers.get('Cache-Control'), 'max-age=1800');
+  assert.equal(hit.response.headers.get('Content-Type'), 'text/calendar; charset=utf-8');
+  for (const { body } of [miss, hit]) {
+    assert.equal((body.match(/BEGIN:VCALENDAR/g) || []).length, 1);
+    assert.equal((body.match(/END:VCALENDAR/g) || []).length, 1);
+    const normalized = body.replace(/^DTSTAMP:[^\r\n]+/gm, 'DTSTAMP:IGNORED');
+    assert.equal(createHash('sha256').update(normalized).digest('hex'), baseline.normalizedSha256);
+    assert.equal(Buffer.byteLength(body), baseline.bytes);
+    assertCalendarLines(body);
+  }
+  // Solar DTSTAMP values are retained with the serialized events on hits.
+  assert.deepEqual(hit.events.slice(0, 720), miss.events.slice(0, 720));
+});
+
+test('solar keys canonicalize numbers, ignore min-uv, and isolate every render option', async () => {
+  const base = await cacheRequest(endpoint, { 'x-test-solar-cache': 'reset' });
+  const canonical = endpoint.replace('latitude=30.48', 'latitude=3.048e1')
+    .replace('longitude=-97.65', 'longitude=-9.765e1')
+    .replace('height=800', 'height=8e2').replace('tz=-6', 'tz=-6.0');
+  for (const url of [canonical, canonical + '&min-uv=99', endpoint + '&min-uv=0&ignored=anything']) {
+    const hit = await cacheRequest(url);
+    assert.equal(hit.key, base.key);
+    assert.equal(hit.counts.sunCalc, 0);
+  }
+  assert.equal(new URL(base.key).pathname, '/solar/v1');
+  for (const [url, headers] of [
+    [endpoint.replace('latitude=30.48', 'latitude=30.49'), {}],
+    [endpoint.replace('longitude=-97.65', 'longitude=-97.66'), {}],
+    [endpoint.replace('height=800', 'height=801'), {}],
+    [endpoint.replace('tz=-6', 'tz=-5'), {}],
+    [endpoint, { 'x-test-now': '2026-10-18T12:00:00Z' }],
+    [endpoint, { 'x-test-locale': 'en-GB' }],
+    [endpoint, { 'x-test-numbering-system': 'arab' }],
+    [endpoint, { 'x-test-output-calendar': 'islamic' }],
+  ]) {
+    const miss = await cacheRequest(url, headers);
+    assert.notEqual(miss.key, base.key);
+    assert.equal(miss.counts.sunCalc, 360, miss.key);
+    const hit = await cacheRequest(url, headers);
+    assert.equal(hit.key, miss.key);
+    assert.equal(hit.counts.sunCalc, 0, hit.key);
+  }
+  const zero = await cacheRequest(locationEndpoint(30.48, -97.65), { 'x-test-solar-cache': 'reset' });
+  for (const url of [locationEndpoint(30.48, -97.65).replace('&tz=0', ''), locationEndpoint(30.48, -97.65, -0).replace('tz=0', 'tz=-0')]) {
+    const hit = await cacheRequest(url);
+    assert.equal(hit.key, zero.key);
+    assert.equal(hit.counts.sunCalc, 0);
+  }
+  const east = await cacheRequest(locationEndpoint(-17.7, 180), { 'x-test-solar-cache': 'reset' });
+  const west = await cacheRequest(locationEndpoint(-17.7, -180), { 'x-test-solar-cache': 'reset' });
+  assert.notEqual(east.key, west.key);
+  assert.notEqual(east.events[0].DTSTART, west.events[0].DTSTART);
+});
+
+test('UV refreshes, thresholds, empty forecasts and errors remain independent of a solar hit', async () => {
+  const base = await cacheRequest(endpoint, { 'x-test-solar-cache': 'reset' });
+  for (const [url, headers, uvCount] of [
+    [endpoint, { 'x-test-fixture': 'changed' }, 1],
+    [endpoint, { 'x-test-fixture': 'empty' }, 0],
+    [endpoint + '&min-uv=99', {}, 0],
+  ]) {
+    const hit = await cacheRequest(url, headers);
+    assert.equal(hit.counts.sunCalc, 0);
+    assert.equal(hit.counts.solarSerializations, 0);
+    assert.equal(hit.counts.uvReads, 1);
+    assert.equal(hit.events.length, 720 + uvCount);
+    assert.deepEqual(hit.events.slice(0, 720), base.events.slice(0, 720));
+    if (uvCount) assert.notEqual(hit.events.at(-1).SUMMARY, base.events.at(-1).SUMMARY);
+    assertCalendarLines(hit.body);
+  }
+  const restored = await cacheRequest();
+  assert.equal(restored.counts.sunCalc, 0);
+  assert.deepEqual(withoutStamp(restored.events.at(-1)), withoutStamp(base.events.at(-1)));
+  const error = await mf.dispatchFetch(endpoint, {
+    headers: { 'x-test-solar-cache': 'use', 'x-test-fixture': 'invalid-json' },
+  });
+  assert.equal(error.status, 502);
+  assert.match(await error.text(), /^Failed to build calendar: /);
+});
+
+test('daily solar keys retain the captured request day and shift the window only at the next request day', async () => {
+  const before = await cacheRequest(endpoint, {
+    'x-test-solar-cache': 'reset', 'x-test-now': '2026-10-16T23:59:59.999Z',
+  });
+  const crossing = await cacheRequest(endpoint, {
+    'x-test-now': '2026-10-16T23:59:59.999Z', 'x-test-next-now': '2026-10-17T00:00:00Z',
+  });
+  assert.equal(crossing.response.headers.get('x-test-uv-clock-advanced'), 'true');
+  assert.equal(crossing.key, before.key);
+  assert.equal(crossing.counts.sunCalc, 0);
+  assert.deepEqual(crossing.events.slice(0, 720), before.events.slice(0, 720));
+  const next = await cacheRequest(endpoint, { 'x-test-now': '2026-10-17T00:00:00Z' });
+  assert.notEqual(next.key, before.key);
+  assert.equal(next.counts.sunCalc, 360);
+  assertSolarWindow(before.events.slice(0, 720), '2026-04-19', '2027-04-13');
+  assertSolarWindow(next.events.slice(0, 720), '2026-04-20', '2027-04-14');
+  assert.deepEqual(before.events.slice(2, 720).map(withoutStamp), next.events.slice(0, 718).map(withoutStamp));
+  assert.equal((await cacheRequest(endpoint, { 'x-test-now': '2026-10-17T18:00:00Z' })).counts.sunCalc, 0);
+});
+
+test('solar cache read, body, metadata and write failures safely regenerate the feed', async () => {
+  const base = await cacheRequest(endpoint, { 'x-test-solar-cache': 'reset' });
+  for (const mode of ['read-error', 'body-error', 'corrupt', 'empty', 'wrong-key', 'missing-key', 'bad-status', 'write-error', 'write-sync-error']) {
+    const fallback = await cacheRequest(endpoint, { 'x-test-solar-cache': mode });
+    assert.equal(fallback.counts.sunCalc, 360, mode);
+    assert.equal(fallback.counts.solarSerializations, 720, mode);
+    assert.deepEqual(fallback.events.map(withoutStamp), base.events.map(withoutStamp), mode);
+    assertCalendarLines(fallback.body);
+  }
+  const recovered = await cacheRequest();
+  assert.equal(recovered.counts.sunCalc, 0);
+  assert.deepEqual(recovered.events.map(withoutStamp), base.events.map(withoutStamp));
+});
+
+test('solar cache checksums reject tampered interiors, nested calendars and missing or wrong hashes', async () => {
+  const base = await cacheRequest(endpoint, { 'x-test-solar-cache': 'reset' });
+  for (const mode of ['tampered', 'broken-interior', 'nested', 'missing-hash', 'wrong-hash']) {
+    const fallback = await cacheRequest(endpoint, { 'x-test-solar-cache': mode });
+    assert.equal(fallback.counts.sunCalc, 360, mode);
+    assert.equal(fallback.counts.solarSerializations, 720, mode);
+    assert.deepEqual(fallback.events.map(withoutStamp), base.events.map(withoutStamp), mode);
+    assert.equal((fallback.body.match(/BEGIN:VCALENDAR/g) || []).length, 1, mode);
+    assert.equal((fallback.body.match(/END:VCALENDAR/g) || []).length, 1, mode);
+  }
+  const recovered = await cacheRequest();
+  assert.equal(recovered.counts.sunCalc, 0);
+  assert.equal(recovered.counts.solarSerializations, 0);
+  assert.equal(recovered.response.headers.get('x-test-digest-calls'), '1');
+});
+
+test('checksum computation failures fall back to generation and do not prevent serving the feed', async () => {
+  const base = await cacheRequest(endpoint, { 'x-test-solar-cache': 'reset' });
+  for (const [mode, expectedDigestCalls] of [['use', '2'], ['reset', '1']]) {
+    const fallback = await cacheRequest(endpoint, {
+      'x-test-solar-cache': mode, 'x-test-hash-failure': 'true',
+    });
+    assert.equal(fallback.counts.sunCalc, 360, mode);
+    assert.equal(fallback.counts.solarSerializations, 720, mode);
+    assert.equal(fallback.response.headers.get('x-test-digest-calls'), expectedDigestCalls, mode);
+    assert.equal(fallback.counts.solarWrites, 0, mode);
+    assert.deepEqual(fallback.events.map(withoutStamp), base.events.map(withoutStamp), mode);
+  }
 });

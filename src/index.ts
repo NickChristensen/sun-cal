@@ -1,4 +1,4 @@
-import ical from "ical-generator";
+import ical, { foldLines } from "ical-generator";
 import { DateTime } from "luxon";
 import SunCalc from "suncalc";
 
@@ -18,6 +18,10 @@ type UvHour = {
 };
 
 const UV_CACHE_TTL_SECONDS = 60 * 30;
+// Bump this namespace when solar calculation, window, or serialization changes.
+const SOLAR_CACHE_VERSION = "v1";
+const SOLAR_CACHE_TTL_SECONDS = 60 * 60 * 24;
+const CALENDAR_END = "END:VCALENDAR";
 const UV_MAX_RETRIES = 6;
 const UV_BACKOFF_START_MS = 1000;
 const UV_REQUEST_TIMEOUT_MS = 10_000;
@@ -112,17 +116,18 @@ export default {
         ctx
       );
 
-      const sunEvents = buildSunEvents(latitude, longitude, height, tzOffset, calendarDay);
+      const solarCalendar = await getSolarCalendar(
+        latitude, longitude, height, tzOffset, calendarDay, ctx
+      );
       const uvEvent = buildUvEvent(uvForecast, minUv, tzOffset);
+      // Event.toString() escapes text; foldLines is the public serializer's
+      // folding step. Only this dynamic event is rendered on a solar cache hit.
+      const uvText = uvEvent ? foldLines(ical().createEvent(uvEvent).toString()) : "";
+      const body = uvText
+        ? solarCalendar.slice(0, -CALENDAR_END.length) + uvText + CALENDAR_END
+        : solarCalendar;
 
-      const calendar = ical({ name: "☀️ Sun" });
-      sunEvents.forEach((event) => calendar.createEvent(event));
-      if (uvEvent) {
-        calendar.createEvent(uvEvent);
-      }
-      calendar.ttl(UV_CACHE_TTL_SECONDS);
-
-      return new Response(calendar.toString(), {
+      return new Response(body, {
         status: 200,
         headers: {
           "Content-Type": "text/calendar; charset=utf-8",
@@ -135,6 +140,71 @@ export default {
     }
   },
 };
+
+async function getSolarCalendar(
+  latitude: number,
+  longitude: number,
+  height: number,
+  tzOffset: number,
+  calendarDay: DateTime,
+  ctx: ExecutionContext
+): Promise<string> {
+  const cache = caches.default;
+  const keyUrl = new URL(`https://cache.sun-cal/solar/${SOLAR_CACHE_VERSION}`);
+  keyUrl.searchParams.set("day", calendarDay.toISODate() as string);
+  keyUrl.searchParams.set("lat", String(latitude));
+  keyUrl.searchParams.set("lng", String(longitude));
+  keyUrl.searchParams.set("height", String(height));
+  keyUrl.searchParams.set("tz", String(tzOffset));
+  const localeOptions = calendarDay.resolvedLocaleOptions();
+  for (const [name, value] of Object.entries(localeOptions)) {
+    keyUrl.searchParams.set(name, String(value));
+  }
+  const cacheKey = new Request(keyUrl);
+
+  try {
+    const cached = await cache.match(cacheKey);
+    if (cached?.ok && cached.headers.get("X-Sun-Cal-Key") === cacheKey.url) {
+      const body = await cached.text();
+      // Entries are written only here. Verify identity, boundaries and the
+      // writer's body checksum without parsing and recreating 720 events.
+      if (body.startsWith("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n") &&
+          body.includes("\r\nBEGIN:VEVENT\r\n") &&
+          body.endsWith(`\r\nEND:VEVENT\r\n${CALENDAR_END}`) &&
+          cached.headers.get("X-Sun-Cal-SHA256") === await calendarDigest(body)) {
+        return body;
+      }
+    }
+  } catch {
+    // The solar cache is an optimization; read failures must not break the feed.
+  }
+
+  const calendar = ical({ name: "☀️ Sun" });
+  buildSunEvents(latitude, longitude, height, tzOffset, calendarDay)
+    .forEach((event) => calendar.createEvent(event));
+  calendar.ttl(UV_CACHE_TTL_SECONDS);
+  const body = calendar.toString();
+
+  try {
+    const cached = new Response(body, {
+      headers: {
+        "Content-Type": "text/calendar; charset=utf-8",
+        "Cache-Control": `max-age=${SOLAR_CACHE_TTL_SECONDS}`,
+        "X-Sun-Cal-Key": cacheKey.url,
+        "X-Sun-Cal-SHA256": await calendarDigest(body),
+      },
+    });
+    ctx.waitUntil(cache.put(cacheKey, cached).catch(() => {}));
+  } catch {
+    // Synchronous write/setup failures likewise leave the generated feed usable.
+  }
+  return body;
+}
+
+async function calendarDigest(body: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 async function getUvForecast(
   latitudeParam: string,
