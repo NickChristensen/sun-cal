@@ -23,8 +23,8 @@ Example:
 https://<your-subdomain>.workers.dev/sun-cal.ics?latitude=30.48&longitude=-97.65&height=800&min-uv=1&tz=-6
 ```
 
-For descriptions that follow Chicago daylight-saving rules, replace `tz=-6` in
-your subscription URL with `tz=America%2FChicago`:
+For events and descriptions that follow Chicago daylight-saving rules, replace
+`tz=-6` in your subscription URL with `tz=America%2FChicago`:
 
 ```
 https://<your-subdomain>.workers.dev/sun-cal.ics?latitude=30.48&longitude=-97.65&height=800&min-uv=1&tz=America%2FChicago
@@ -34,18 +34,30 @@ Existing numeric subscriptions keep their fixed-offset descriptions. Named
 subscriptions use the canonical regional name and each event/hour's UTC offset;
 UV rows include minutes, including fractional-offset regions such as Kathmandu.
 Slash-containing region/alias identifiers, `Etc/*`, and `UTC` are supported when
-recognized by the runtime. Bare abbreviations such as `CST`, `local`/`system`,
-offset strings such as `+05:30`, and unsupported names return HTTP 400 before
+present in the pinned IANA 2026e data. Bare abbreviations such as `CST`,
+`local`/`system`, offset strings such as `+05:30`, and unsupported names return HTTP 400 before
 forecast access. Numeric values are parsed first, preserving existing finite
 numeric spellings; encode literal plus signs in URLs (`Etc/GMT%2B5` means UTC-05).
 
-All event endpoints and stamps remain UTC instants. Named feeds add the
-nonstandard `X-WR-TIMEZONE` calendar hint; viewers can ignore it or display the
-event in the viewer's own timezone. This does not guarantee removal of Apple's
-secondary GMT label. Refresh the named URL directly in your calendar client to
-check its presentation. Regional descriptions use the deployed runtime's Intl
-timezone rules; recent legislative changes may require a runtime update. They
-do not change event instants. See [the design decision](docs/timezone-design.md).
+Named feeds use local `DTSTART`/`DTEND` values with the canonical `TZID` and one
+matching `VTIMEZONE`. Their absolute instants and UIDs stay the same as numeric
+feeds; all `DTSTAMP` values remain UTC. One narrow exception preserves exact
+instants: if either endpoint occurs in the second occurrence of a backward-clock
+fold, the entire event uses UTC endpoints. RFC 5545 can only identify the first
+occurrence with an ordinary local TZID value. Descriptions still show the
+requested region and actual offset. First occurrences and other transition
+crossings retain TZID.
+
+Named feeds also include `X-WR-TIMEZONE`. Viewers can display events in their own
+zone; source-zone labels and Apple's secondary GMT label still require a client
+check. Upgrade the subscription URL and refresh it directly in your calendar
+client to check its presentation. Named conversion and definitions share pinned
+IANA 2026e rules, independent of runtime Intl. Future legislative changes require
+updating the conversion data and assets together. All named solar/UV endpoints
+must lie within 2006-01-01 inclusive through 2088-01-01 exclusive (UTC); requests
+outside coverage fail with HTTP 502 instead of extrapolating a terminal offset.
+See [the design decision](docs/timezone-design.md) and
+[asset generation instructions](docs/timezone-assets.md).
 
 ## Requirements
 - An [OpenUV](https://www.openuv.io) API key (free for up to 50 reqs/day)
@@ -82,9 +94,20 @@ Tests run the Worker in local workerd with the compatibility date and flags from
 requests and Cloudflare metadata lookups are disabled. No API key is needed.
 Solar-generation tests bypass the solar cache; separate cache tests count actual
 astronomy and event serialization calls, and exercise UV refreshes and failures.
-Named-zone tests parse actual Worker output independently with `ical.js`, check
-UTC instants/stamps across DST gaps and both fold occurrences, and cover
-fractional-offset rows, aliases, cache separation and invalid input handling.
+Named-zone tests check actual Worker output across DST gaps and both fold
+occurrences, fractional-offset rows, aliases, cache separation and invalid input
+handling. ICAL.js's known first-fold deviation is retained as negative evidence;
+it does not widen the approved UTC exception. To independently verify complete
+Worker feeds with Python ZoneInfo and an embedded-definition parser:
+
+```sh
+python3 -m venv /tmp/sun-cal-python
+/tmp/sun-cal-python/bin/pip install -r test/timezone-requirements.txt
+SUN_CAL_TIMEZONE_FIXTURES=/tmp/sun-cal-worker-feeds npm test
+/tmp/sun-cal-python/bin/python test/verify-timezones.py /tmp/sun-cal-worker-feeds
+```
+
+These remain local synthetic forecasts with all outbound requests blocked.
 The calendar baseline was captured with `ical-generator` 6.0.1 at the fixed time
 recorded in `test/fixtures/calendar-baseline.json`; its digest ignores only
 `DTSTAMP` values and protects the complete feed during the serializer upgrade.
@@ -106,7 +129,8 @@ wrangler deploy
   namespace. `min-uv` does not fragment this solar cache. Bump
   `SOLAR_CACHE_VERSION` when solar calculations, window rules, formatting or
   serialization, runtime compatibility or timezone-data assumptions change;
-  prior versions expire naturally. Named rendering uses namespace `v2`.
+  prior versions expire naturally. Rendering uses namespace `v3`; named keys
+  also include the pinned IANA release and asset digest.
 - A solar cache hit skips astronomy and serialization of all 720 solar events.
   UV keeps its independent 30-minute forecast cache, and its event is rendered
   for every request and appended to the solar calendar. The merged feed keeps
@@ -124,7 +148,8 @@ wrangler deploy
   then verify its SHA-256 body checksum recorded at cache fill. Interior changes,
   truncation or missing integrity metadata trigger regeneration without parsing
   every event; checksum failures also leave the generated feed usable.
-- Event timestamps are UTC; description text uses `tz` to format local time.
+- Numeric endpoints remain UTC; named endpoints normally carry a regional TZID.
+  Both forms preserve the same absolute instants.
 - The solar window uses the UTC date when the request starts: 180 days before
   through 179 days after that date (360 days, two solar events per day).
   Each date's sunrise/sunset uses its local solar cycle, independent of the

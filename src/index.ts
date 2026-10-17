@@ -1,6 +1,8 @@
 import ical, { foldLines } from "ical-generator";
-import { DateTime } from "luxon";
+import { DateTime, FixedOffsetZone } from "luxon";
 import SunCalc from "suncalc";
+import { canonicalTimezone, namedEventDates, regionalTime, requireTimezoneCoverage,
+  timezoneComponent, TIMEZONE_ASSET_VERSION, TIMEZONE_DATA_VERSION } from "./timezones";
 
 interface Env {
   OPENUV_API_KEY: string;
@@ -23,7 +25,7 @@ type DisplayTimezone =
 
 const UV_CACHE_TTL_SECONDS = 60 * 30;
 // Bump this namespace when solar calculation, window, or serialization changes.
-const SOLAR_CACHE_VERSION = "v2";
+const SOLAR_CACHE_VERSION = "v3";
 const SOLAR_CACHE_TTL_SECONDS = 60 * 60 * 24;
 const CALENDAR_END = "END:VCALENDAR";
 const UV_MAX_RETRIES = 6;
@@ -112,6 +114,10 @@ export default {
     try {
       // Keep the window tied to one UTC day, even if the UV request crosses midnight.
       const calendarDay = DateTime.utc().startOf("day");
+      if (timezone.mode === "iana") {
+        requireTimezoneCoverage(calendarDay.minus({ days: 180 }).toMillis());
+        requireTimezoneCoverage(calendarDay.plus({ days: 180 }).toMillis() - 1);
+      }
       const uvForecast = await getUvForecast(
         latitudeParam as string,
         longitudeParam as string,
@@ -126,7 +132,9 @@ export default {
       const uvEvent = buildUvEvent(uvForecast, minUv, timezone);
       // Event.toString() escapes text; foldLines is the public serializer's
       // folding step. Only this dynamic event is rendered on a solar cache hit.
-      const uvText = uvEvent ? foldLines(ical().createEvent(uvEvent).toString()) : "";
+      const uvText = uvEvent ? foldLines(ical().createEvent({ ...uvEvent,
+        ...(timezone.mode === "iana" ? namedEventDates(uvEvent.start, uvEvent.end, timezone.zone) : {}),
+      }).toString()) : "";
       const body = uvText
         ? solarCalendar.slice(0, -CALENDAR_END.length) + uvText + CALENDAR_END
         : solarCalendar;
@@ -151,18 +159,13 @@ function parseDisplayTimezone(value: string | null): DisplayTimezone | null {
   if (Number.isFinite(offset)) {
     return { mode: "fixed", offset };
   }
-  // Do not admit Intl's bare abbreviations or offset identifiers as IANA names.
+  // Do not admit bare abbreviations or offset identifiers as IANA names.
   if (value === null || !(/^UTC$/i.test(value) ||
       /^[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)+$/.test(value))) {
     return null;
   }
-  try {
-    const zone = new Intl.DateTimeFormat("en-US", { timeZone: value })
-      .resolvedOptions().timeZone;
-    return { mode: "iana", zone };
-  } catch {
-    return null;
-  }
+  const zone = canonicalTimezone(value);
+  return zone ? { mode: "iana", zone } : null;
 }
 
 async function getSolarCalendar(
@@ -181,6 +184,10 @@ async function getSolarCalendar(
   keyUrl.searchParams.set("height", String(height));
   keyUrl.searchParams.set("tzMode", timezone.mode);
   keyUrl.searchParams.set("tz", timezone.mode === "fixed" ? String(timezone.offset) : timezone.zone);
+  if (timezone.mode === "iana") {
+    keyUrl.searchParams.set("tzData", TIMEZONE_DATA_VERSION);
+    keyUrl.searchParams.set("tzAssets", TIMEZONE_ASSET_VERSION);
+  }
   const localeOptions = calendarDay.resolvedLocaleOptions();
   for (const [name, value] of Object.entries(localeOptions)) {
     keyUrl.searchParams.set(name, String(value));
@@ -210,11 +217,14 @@ async function getSolarCalendar(
     calendar.x("X-WR-TIMEZONE", timezone.zone);
   }
   // Serialize calendar properties before adding components. Calendar.timezone()
-  // stays unset so the library keeps every endpoint and DTSTAMP in UTC.
+  // stays unset so DTSTAMP remains UTC. Named endpoints use per-event zones.
   const header = calendar.toString();
   const eventsText = buildSunEvents(latitude, longitude, height, timezone, calendarDay)
-    .map((event) => foldLines(calendar.createEvent(event).toString())).join("");
-  const body = header.slice(0, -CALENDAR_END.length) + eventsText + CALENDAR_END;
+    .map((event) => foldLines(calendar.createEvent({ ...event,
+      ...(timezone.mode === "iana" ? namedEventDates(event.start, event.end, timezone.zone) : {}),
+    }).toString())).join("");
+  const component = timezone.mode === "iana" ? timezoneComponent(timezone.zone) : "";
+  const body = header.slice(0, -CALENDAR_END.length) + component + eventsText + CALENDAR_END;
 
   try {
     const cached = new Response(body, {
@@ -373,7 +383,8 @@ function formatSunTime(date: Date, timezone: DisplayTimezone): string {
   if (timezone.mode === "fixed") {
     return utc.plus({ hours: timezone.offset }).toLocaleString(DateTime.TIME_SIMPLE);
   }
-  const local = utc.setZone(timezone.zone);
+  const pinned = regionalTime(date.valueOf(), timezone.zone);
+  const local = utc.setZone(FixedOffsetZone.instance(pinned.utcOffset()));
   return `${local.toLocaleString(DateTime.TIME_SIMPLE)} (${regionalLabel(local, timezone.zone)})`;
 }
 
@@ -422,7 +433,8 @@ function createEventId(type: string, date: Date) {
 
 function createBarChartLine({ hour, uv }: UvHour, minUv: number, timezone: DisplayTimezone) {
   const local = timezone.mode === "fixed"
-    ? hour.plus({ hours: timezone.offset }) : hour.setZone(timezone.zone);
+    ? hour.plus({ hours: timezone.offset })
+    : hour.setZone(FixedOffsetZone.instance(regionalTime(hour.toMillis(), timezone.zone).utcOffset()));
   const formattedHour = local.toLocaleString(timezone.mode === "fixed"
     ? { hour: "2-digit" } : { hour: "2-digit", minute: "2-digit" });
   const fixedWidthTime = formattedHour

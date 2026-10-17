@@ -1,0 +1,7 @@
+icalendar==7.3.0
+vobject==0.9.9
+tzdata==2026.5
+python-dateutil==2.9.0.post0
+six==1.17.0
+pytz==2026.5
+typing_extensions==4.16.0

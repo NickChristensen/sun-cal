@@ -1,0 +1,154 @@
+[
+  {
+    "uid": "chicago-summer",
+    "inputZone": "America/Chicago",
+    "zone": "America/Chicago",
+    "fallback": false,
+    "expectedStart": "2026-07-15T12:00:00.000Z",
+    "expectedEnd": "2026-07-15T12:30:00.000Z"
+  },
+  {
+    "uid": "chicago-winter",
+    "inputZone": "America/Chicago",
+    "zone": "America/Chicago",
+    "fallback": false,
+    "expectedStart": "2027-01-15T18:00:00.000Z",
+    "expectedEnd": "2027-01-15T18:30:00.000Z"
+  },
+  {
+    "uid": "chicago-gap-boundary",
+    "inputZone": "America/Chicago",
+    "zone": "America/Chicago",
+    "fallback": false,
+    "expectedStart": "2026-03-08T07:59:00.000Z",
+    "expectedEnd": "2026-03-08T08:00:00.000Z"
+  },
+  {
+    "uid": "chicago-gap-crossing",
+    "inputZone": "America/Chicago",
+    "zone": "America/Chicago",
+    "fallback": false,
+    "expectedStart": "2026-03-08T07:30:00.000Z",
+    "expectedEnd": "2026-03-08T08:30:00.000Z"
+  },
+  {
+    "uid": "chicago-first-fold",
+    "inputZone": "America/Chicago",
+    "zone": "America/Chicago",
+    "fallback": false,
+    "expectedStart": "2026-11-01T06:30:00.000Z",
+    "expectedEnd": "2026-11-01T06:50:00.000Z"
+  },
+  {
+    "uid": "chicago-second-fold",
+    "inputZone": "America/Chicago",
+    "zone": "America/Chicago",
+    "fallback": true,
+    "expectedStart": "2026-11-01T07:30:00.000Z",
+    "expectedEnd": "2026-11-01T07:50:00.000Z"
+  },
+  {
+    "uid": "chicago-end-second-fold",
+    "inputZone": "America/Chicago",
+    "zone": "America/Chicago",
+    "fallback": true,
+    "expectedStart": "2026-11-01T05:30:00.000Z",
+    "expectedEnd": "2026-11-01T07:30:00.000Z"
+  },
+  {
+    "uid": "chicago-fold-crossing",
+    "inputZone": "America/Chicago",
+    "zone": "America/Chicago",
+    "fallback": false,
+    "expectedStart": "2026-11-01T05:30:00.000Z",
+    "expectedEnd": "2026-11-01T08:30:00.000Z"
+  },
+  {
+    "uid": "berlin-first-fold",
+    "inputZone": "Europe/Berlin",
+    "zone": "Europe/Berlin",
+    "fallback": false,
+    "expectedStart": "2026-10-25T00:30:00.000Z",
+    "expectedEnd": "2026-10-25T00:50:00.000Z"
+  },
+  {
+    "uid": "berlin-second-fold",
+    "inputZone": "Europe/Berlin",
+    "zone": "Europe/Berlin",
+    "fallback": true,
+    "expectedStart": "2026-10-25T01:30:00.000Z",
+    "expectedEnd": "2026-10-25T01:50:00.000Z"
+  },
+  {
+    "uid": "lord-howe-first-fold",
+    "inputZone": "Australia/Lord_Howe",
+    "zone": "Australia/Lord_Howe",
+    "fallback": false,
+    "expectedStart": "2026-04-04T14:45:00.000Z",
+    "expectedEnd": "2026-04-04T14:50:00.000Z"
+  },
+  {
+    "uid": "lord-howe-second-fold",
+    "inputZone": "Australia/Lord_Howe",
+    "zone": "Australia/Lord_Howe",
+    "fallback": true,
+    "expectedStart": "2026-04-04T15:15:00.000Z",
+    "expectedEnd": "2026-04-04T15:20:00.000Z"
+  },
+  {
+    "uid": "kathmandu",
+    "inputZone": "Asia/Kathmandu",
+    "zone": "Asia/Kathmandu",
+    "fallback": false,
+    "expectedStart": "2026-10-16T12:00:00.000Z",
+    "expectedEnd": "2026-10-16T13:00:00.000Z"
+  },
+  {
+    "uid": "casablanca-before-change",
+    "inputZone": "Africa/Casablanca",
+    "zone": "Africa/Casablanca",
+    "fallback": false,
+    "expectedStart": "2026-09-19T12:00:00.000Z",
+    "expectedEnd": "2026-09-19T13:00:00.000Z"
+  },
+  {
+    "uid": "casablanca-after-change",
+    "inputZone": "Africa/Casablanca",
+    "zone": "Africa/Casablanca",
+    "fallback": false,
+    "expectedStart": "2026-09-21T12:00:00.000Z",
+    "expectedEnd": "2026-09-21T13:00:00.000Z"
+  },
+  {
+    "uid": "edmonton-new-rule",
+    "inputZone": "America/Edmonton",
+    "zone": "America/Edmonton",
+    "fallback": false,
+    "expectedStart": "2026-11-05T12:00:00.000Z",
+    "expectedEnd": "2026-11-05T13:00:00.000Z"
+  },
+  {
+    "uid": "winnipeg-new-rule",
+    "inputZone": "America/Winnipeg",
+    "zone": "America/Winnipeg",
+    "fallback": false,
+    "expectedStart": "2026-11-05T12:00:00.000Z",
+    "expectedEnd": "2026-11-05T13:00:00.000Z"
+  },
+  {
+    "uid": "alias-central",
+    "inputZone": "US/Central",
+    "zone": "America/Chicago",
+    "fallback": false,
+    "expectedStart": "2026-10-16T12:00:00.000Z",
+    "expectedEnd": "2026-10-16T13:00:00.000Z"
+  },
+  {
+    "uid": "named-utc",
+    "inputZone": "UTC",
+    "zone": "Etc/UTC",
+    "fallback": false,
+    "expectedStart": "2026-10-16T12:00:00.000Z",
+    "expectedEnd": "2026-10-16T13:00:00.000Z"
+  }
+]

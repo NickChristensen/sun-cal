@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import moment from 'moment-timezone';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -154,6 +155,7 @@ before(async () => {
         let nextNow;
         let uvClockAdvanced;
         let solarMode;
+        let sunTimesFixture;
         let counts;
         let solarKey;
         let solarTtl;
@@ -171,7 +173,8 @@ before(async () => {
         const originalSunTimes = SunCalc.getTimes;
         SunCalc.getTimes = function(...args) {
           counts.sunCalc += 1;
-          return originalSunTimes.apply(this, args);
+          return sunTimesFixture ? Object.fromEntries(Object.entries(sunTimesFixture)
+            .map(([key, value]) => [key, new Date(value)])) : originalSunTimes.apply(this, args);
         };
         const originalCalendarString = ICalCalendar.prototype.toString;
         ICalCalendar.prototype.toString = function(...args) {
@@ -197,10 +200,10 @@ before(async () => {
               await originalDelete.call(this, args[0]);
               return undefined;
             }
-            if (solarMode === 'v1-only') {
+            if (solarMode === 'v2-only') {
               const current = await originalMatch.apply(this, args);
               const legacy = new URL(url);
-              legacy.pathname = '/solar/v1';
+              legacy.pathname = '/solar/v2';
               const headers = new Headers(current.headers);
               headers.set('X-Sun-Cal-Key', legacy.href);
               await originalPut.call(this, legacy.href, new Response(current.body, { headers }));
@@ -263,6 +266,7 @@ before(async () => {
         };
         export default { async fetch(request, env, ctx) {
           solarMode = request.headers.get('x-test-solar-cache') || 'bypass';
+          sunTimesFixture = JSON.parse(request.headers.get('x-test-sun-times') || 'null');
           counts = { sunCalc: 0, solarSerializations: 0, uvSerializations: 0,
             calendarSerializations: 0, solarReads: 0, solarWrites: 0, uvReads: 0 };
           solarKey = '';
@@ -552,7 +556,7 @@ test('solar keys canonicalize numbers, ignore min-uv, and isolate every render o
     assert.equal(hit.key, base.key);
     assert.equal(hit.counts.sunCalc, 0);
   }
-  assert.equal(new URL(base.key).pathname, '/solar/v2');
+  assert.equal(new URL(base.key).pathname, '/solar/v3');
   for (const [url, headers] of [
     [endpoint.replace('latitude=30.48', 'latitude=30.49'), {}],
     [endpoint.replace('longitude=-97.65', 'longitude=-97.66'), {}],
@@ -693,7 +697,8 @@ test('legacy defaults, Number spellings and fractional offsets retain their nume
 
 test('unsupported named spellings fail before forecast or solar cache access', async () => {
   for (const value of ['CST', 'PST', 'local', 'system', '+05:30', 'UTC+05:30',
-    'America/Not_A_Zone', 'America/../Chicago', ' America/Chicago ', 'NaN', 'Infinity',
+    'America/Not_A_Zone', 'America/Indiana_Indianapolis', 'America_Indiana/Indianapolis',
+    'America/../Chicago', ' America/Chicago ', 'NaN', 'Infinity',
     'America/Chicago\r\nX-INJECTED:bad']) {
     const response = await mf.dispatchFetch(withTimezone(value));
     assert.equal(response.status, 400, value);
@@ -711,7 +716,8 @@ test('named Worker feeds contain one calendar, a property-position hint and exac
   assert.ok(named.body.indexOf('X-WR-TIMEZONE:') < named.body.indexOf('BEGIN:VEVENT'));
   assert.equal((named.body.match(/BEGIN:VCALENDAR/g) || []).length, 1);
   assert.equal((named.body.match(/END:VCALENDAR/g) || []).length, 1);
-  assert.equal(named.parsed.getAllSubcomponents('vtimezone').length, 0);
+  assert.equal(named.parsed.getAllSubcomponents('vtimezone').length, 1);
+  assert.equal(named.parsed.getFirstSubcomponent('vtimezone').getFirstPropertyValue('tzid'), 'America/Chicago');
   assert.equal(named.events.length, 721);
   assert.equal(new Set(named.events.map(event => event.uid)).size, 721);
   assertCalendarLines(named.body);
@@ -721,8 +727,8 @@ test('named Worker feeds contain one calendar, a property-position hint and exac
     assert.equal(event.endDate.toUnixTime(), legacy.events[index].endDate.toUnixTime());
     for (const propertyName of ['dtstart', 'dtend', 'dtstamp']) {
       const property = event.component.getFirstProperty(propertyName);
-      assert.equal(property.getParameter('tzid'), undefined);
-      assert.equal(property.getFirstValue().zone.tzid, 'UTC');
+      assert.equal(property.getParameter('tzid'), propertyName === 'dtstamp' ? undefined : 'America/Chicago');
+      if (propertyName === 'dtstamp') assert.equal(property.getFirstValue().zone.tzid, 'UTC');
       assert.equal(property.getFirstValue().isDate, false);
     }
   }
@@ -749,7 +755,13 @@ test('named UV rows preserve both fold occurrences, spring gaps and half-hour tr
     const { events } = await namedCalendar(zone, forecastItems, hours[0]);
     const event = events.at(-1);
     assert.equal(event.uid, 'sun-cal-peak-uv-' + hours[0].slice(0, 10));
-    assert.equal(event.startDate.toJSDate().toISOString(), hours[0].replace('Z', '.000Z'));
+    const expectedStart = hours[0].replace('Z', '.000Z');
+    if (['2026-11-01T06:00:00Z', '2026-10-25T00:00:00Z'].includes(hours[0])) {
+      assert.notEqual(event.startDate.toJSDate().toISOString(), expectedStart,
+        'known ICAL.js first-fold deviation; independently checked by Python');
+      assert.equal(event.component.getFirstProperty('dtstart').getParameter('tzid'), zone);
+      assert.equal(event.startDate.toString(), moment.utc(hours[0]).tz(zone).format('YYYY-MM-DDTHH:mm:ss'));
+    } else assert.equal(event.startDate.toJSDate().toISOString(), expectedStart);
     assert.equal(event.endDate.toJSDate().toISOString(), expectedEnd);
     const chart = plainChart(event.description);
     assert.equal(chart.split('\n').length, 2);
@@ -763,6 +775,10 @@ test('fractional named zones retain UV minutes, encoded Etc offsets and viewer t
     ['Australia/Lord_Howe', '2026-07-16T12:00:00Z', '10:30pm', '+10:30'],
     ['Australia/Lord_Howe', '2026-12-16T12:00:00Z', '11:00pm', '+11:00'],
     ['Etc/GMT+5', '2026-10-16T12:00:00Z', '07:00am', '-05:00'],
+    ['Africa/Casablanca', '2026-09-19T12:00:00Z', '01:00pm', '+01:00'],
+    ['Africa/Casablanca', '2026-09-21T12:00:00Z', '12:00pm', '+00:00'],
+    ['America/Edmonton', '2026-11-05T12:00:00Z', '06:00am', '-06:00'],
+    ['America/Winnipeg', '2026-11-05T12:00:00Z', '07:00am', '-05:00'],
   ]) {
     const result = await namedCalendar(zone, [{ uv: 7, uv_time: time }], time);
     const chart = plainChart(result.events.at(-1).description);
@@ -786,10 +802,16 @@ test('named cache modes, canonical aliases and daily keys preserve hits and fres
   const chicago = withTimezone('America/Chicago');
   const base = await cacheRequest(chicago, { 'x-test-solar-cache': 'reset' });
   const key = new URL(base.key);
-  assert.equal(key.pathname, '/solar/v2');
+  assert.equal(key.pathname, '/solar/v3');
   assert.equal(key.searchParams.get('tzMode'), 'iana');
   assert.equal(key.searchParams.get('tz'), 'America/Chicago');
-  for (const alias of ['US/Central', 'america/chicago']) {
+  assert.equal(key.searchParams.get('tzData'), '2026e');
+  const assetManifest = JSON.parse(readFileSync(new URL('../src/data/timezones-manifest.json', import.meta.url)));
+  assert.equal(key.searchParams.get('tzAssets'), assetManifest.sha256);
+  const assetBytes = readFileSync(new URL('../src/data/timezones.json', import.meta.url));
+  assert.equal(createHash('sha256').update(assetBytes).digest('hex'), assetManifest.sha256);
+  assert.equal(moment.tz.dataVersion, assetManifest.iana);
+  for (const alias of ['US/Central', 'us/central', 'america/chicago']) {
     const hit = await cacheRequest(withTimezone(alias));
     assert.equal(hit.key, base.key);
     assert.equal(hit.counts.sunCalc, 0);
@@ -810,6 +832,7 @@ test('named cache modes, canonical aliases and daily keys preserve hits and fres
     assert.equal(hit.events.length, expectedCount);
     if (headers['x-test-fixture'] === 'changed') assert.notEqual(hit.events.at(-1).SUMMARY, base.events.at(-1).SUMMARY);
     assert.equal((hit.body.match(/X-WR-TIMEZONE:/g) || []).length, 1);
+    assert.equal((hit.body.match(/BEGIN:VTIMEZONE/g) || []).length, 1);
   }
   for (const value of ['America/New_York', '-5', '0', 'UTC']) {
     const other = await cacheRequest(withTimezone(value), { 'x-test-solar-cache': 'reset' });
@@ -824,15 +847,16 @@ test('named cache modes, canonical aliases and daily keys preserve hits and fres
   }
   const rollover = await cacheRequest(chicago, { 'x-test-now': '2026-10-17T00:00:00Z' });
   assert.notEqual(rollover.key, base.key);
-  assertSolarWindow(rollover.events.slice(0, 720), '2026-04-20', '2027-04-14');
+  assert.equal(rollover.events[0].UID, 'sun-cal-sunrise-2026-04-20');
+  assert.equal(rollover.events[719].UID, 'sun-cal-sunset-2027-04-14');
   assert.deepEqual(base.events.slice(2, 720).map(withoutStamp), rollover.events.slice(0, 718).map(withoutStamp));
 });
 
-test('v1 entries cannot satisfy v2 reads and named offsets stay ASCII under another numbering system', async () => {
+test('v2 entries cannot satisfy v3 reads and named offsets stay ASCII under another numbering system', async () => {
   await cacheRequest(endpoint, { 'x-test-solar-cache': 'reset' });
-  const miss = await cacheRequest(endpoint, { 'x-test-solar-cache': 'v1-only' });
+  const miss = await cacheRequest(endpoint, { 'x-test-solar-cache': 'v2-only' });
   assert.equal(miss.response.headers.get('x-test-legacy-cache-present'), 'true');
-  assert.equal(new URL(miss.key).pathname, '/solar/v2');
+  assert.equal(new URL(miss.key).pathname, '/solar/v3');
   assert.equal(miss.counts.sunCalc, 360);
   assert.equal(miss.counts.solarSerializations, 720);
   assert.equal((await cacheRequest()).counts.sunCalc, 0);
@@ -842,4 +866,124 @@ test('v1 entries cannot satisfy v2 reads and named offsets stay ASCII under anot
   const parsed = new ICAL.Component(ICAL.parse(named.body));
   const uv = new ICAL.Event(parsed.getAllSubcomponents('vevent').at(-1));
   assert.match(uv.description, /America\/Chicago, UTC-05:00/);
+});
+
+test('pinned conversion, explicit definitions and actual Worker fixtures preserve exact endpoints', async () => {
+  const definitions = JSON.parse(readFileSync(new URL('./fixtures/timezone-cases.json', import.meta.url)));
+  const outputDirectory = process.env.SUN_CAL_TIMEZONE_FIXTURES;
+  const manifest = [];
+  if (outputDirectory) mkdirSync(outputDirectory, { recursive: true });
+  const record = (uid, body, expected) => {
+    if (!outputDirectory) return;
+    writeFileSync(`${outputDirectory}/${uid}.ics`, body);
+    manifest.push({ uid, expected });
+  };
+  for (const item of definitions) {
+    const start = item.expectedStart, end = item.expectedEnd;
+    const response = await mf.dispatchFetch(withTimezone(item.inputZone), { headers: {
+      'x-test-forecast': '[]',
+      'x-test-sun-times': JSON.stringify({ dawn: start, sunrise: start, sunriseEnd: end,
+        sunsetStart: start, sunset: start, dusk: end }),
+      'x-test-numbering-system': 'arab', 'x-test-zone': 'Asia/Tokyo',
+    } });
+    const body = await response.text();
+    assert.equal(response.status, 200, body);
+    const parsed = new ICAL.Component(ICAL.parse(body));
+    assert.equal(parsed.getAllSubcomponents('vtimezone').length, 1);
+    assert.equal(parsed.getFirstSubcomponent('vtimezone').getFirstPropertyValue('tzid'), item.zone);
+    assert.equal(parsed.getFirstPropertyValue('x-wr-timezone'), item.zone);
+    assert.ok(body.indexOf('X-WR-TIMEZONE:') < body.indexOf('BEGIN:VTIMEZONE'));
+    assert.ok(body.indexOf('END:VTIMEZONE') < body.indexOf('BEGIN:VEVENT'));
+    assert.ok(!unfold(body).includes('\r\nRRULE:'));
+    assert.ok(!unfold(body).includes('\r\nRDATE:'));
+    const events = eventsFrom(body);
+    assert.equal(events.length, 720);
+    const expected = [];
+    for (const event of events) {
+      for (const [key, instant] of [['DTSTART', start], ['DTEND', end]]) {
+        const property = item.fallback ? key : `${key};TZID=${item.zone}`;
+        const value = item.fallback ? moment.utc(instant).format('YYYYMMDD[T]HHmmss[Z]')
+          : moment.utc(instant).tz(item.zone).format('YYYYMMDD[T]HHmmss');
+        assert.equal(event[property], value, item.uid);
+        assert.match(event[property], /^[0-9T]+Z?$/, 'ICS date fields stay ASCII');
+        assert.ok(!Object.hasOwn(event, item.fallback ? `${key};TZID=${item.zone}` : key));
+      }
+      assert.match(event.DTSTAMP, /^\d{8}T\d{6}Z$/);
+      expected.push({ uid: event.UID, start, end });
+    }
+    assertCalendarLines(body);
+    record(item.uid, body, expected);
+  }
+  // Also independently parse real astronomy and dynamic UV from complete feeds.
+  for (const zone of ['America/Chicago', 'Africa/Casablanca', 'America/Edmonton',
+    'Asia/Kathmandu', 'Australia/Lord_Howe', 'UTC']) {
+    const legacy = await namedCalendar('0');
+    const named = await namedCalendar(zone);
+    const expected = legacy.events.map(event => ({ uid: event.uid,
+      start: event.startDate.toJSDate().toISOString(), end: event.endDate.toJSDate().toISOString() }));
+    record('astronomy-' + zone.replaceAll('/', '-'), named.body, expected);
+  }
+  for (const [uid, zone, hours] of [
+    ['uv-first-fold-crossing', 'America/Chicago', ['2026-11-01T06:00:00Z', '2026-11-01T07:00:00Z']],
+    ['uv-second-fold-start', 'America/Chicago', ['2026-11-01T07:00:00Z']],
+    ['uv-second-fold-end', 'America/Chicago', ['2026-11-01T06:00:00Z']],
+    ['uv-lord-howe-fold', 'Australia/Lord_Howe', ['2026-04-04T15:00:00Z']],
+  ]) {
+    const values = hours.map(uv_time => ({ uv: 7, uv_time }));
+    const legacy = await namedCalendar('0', values);
+    const named = await namedCalendar(zone, values);
+    record(uid, named.body, legacy.events.map(event => ({ uid: event.uid,
+      start: event.startDate.toJSDate().toISOString(), end: event.endDate.toJSDate().toISOString() })));
+  }
+  if (outputDirectory) writeFileSync(`${outputDirectory}/manifest.json`, JSON.stringify(manifest));
+});
+
+test('only a second-occurrence endpoint triggers the whole UV event UTC exception', async () => {
+  for (const [hours, fallback] of [
+    [['2026-11-01T06:00:00Z'], true], // end is the second 01:00
+    [['2026-11-01T07:00:00Z'], true], // start is the second 01:00
+    [['2026-11-01T06:00:00Z', '2026-11-01T07:00:00Z'], false], // endpoints first/after fold
+    [['2026-11-01T08:00:00Z'], false],
+  ]) {
+    const result = await namedCalendar('America/Chicago', hours.map(uv_time => ({ uv: 7, uv_time })));
+    const event = result.events.at(-1);
+    for (const name of ['dtstart', 'dtend']) {
+      const property = event.component.getFirstProperty(name);
+      assert.equal(property.getParameter('tzid'), fallback ? undefined : 'America/Chicago');
+      if (fallback) assert.equal(property.getFirstValue().zone.tzid, 'UTC');
+    }
+    assert.equal(event.component.getFirstPropertyValue('dtstamp').zone.tzid, 'UTC');
+    assert.equal(result.parsed.getAllSubcomponents('vtimezone').length, 1);
+  }
+});
+
+test('named coverage guards the window and every actual solar and UV endpoint', async () => {
+  for (const now of ['2006-01-01T00:00:00Z', '2087-12-31T00:00:00Z']) {
+    const response = await mf.dispatchFetch(withTimezone('America/Chicago'), { headers: { 'x-test-now': now } });
+    assert.equal(response.status, 502);
+    assert.match(await response.text(), /Named timezone coverage/);
+    assert.equal(JSON.parse(response.headers.get('x-test-counts')).uvReads, 0);
+  }
+  for (const end of ['2005-12-31T23:59:59Z', '2088-01-01T00:00:00Z']) {
+    const response = await mf.dispatchFetch(withTimezone('America/Chicago'), { headers: {
+      'x-test-sun-times': JSON.stringify({ dawn: baseline.now, sunrise: baseline.now,
+        sunriseEnd: end, sunsetStart: baseline.now, sunset: baseline.now, dusk: baseline.now }),
+    } });
+    assert.equal(response.status, 502);
+    assert.match(await response.text(), /Named timezone coverage/);
+  }
+  const url = withTimezone('America/Chicago');
+  await cacheRequest(url, { 'x-test-solar-cache': 'reset' });
+  for (const uv_time of ['2005-12-31T23:00:00Z', '2087-12-31T23:00:00Z', '2088-01-01T00:00:00Z']) {
+    const response = await mf.dispatchFetch(url, { headers: {
+      'x-test-solar-cache': 'use', 'x-test-forecast': JSON.stringify([{ uv: 7, uv_time }]),
+    } });
+    assert.equal(response.status, 502);
+    assert.match(await response.text(), /Named timezone coverage/);
+    assert.equal(JSON.parse(response.headers.get('x-test-counts')).sunCalc, 0);
+  }
+  for (const uv_time of ['2006-01-01T00:00:00Z', '2087-12-31T22:00:00Z']) {
+    const result = await namedCalendar('UTC', [{ uv: 7, uv_time }]);
+    assert.equal(result.events.at(-1).startDate.toJSDate().toISOString(), uv_time.replace('Z', '.000Z'));
+  }
 });

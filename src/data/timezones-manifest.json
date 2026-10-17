@@ -1,0 +1,16 @@
+{
+  "iana": "2026e",
+  "momentDataVersion": "2026e",
+  "ianaCommit": "039ef27cc5f062a2055cb67435d6d71adbefd27d",
+  "generatorCommit": "0dec1575bc81de232b8bea18f5d9c22fbc0daa12",
+  "generatorOptions": [
+    "--pure",
+    "--no-rrules",
+    "--no-rdates"
+  ],
+  "canonicalZones": 344,
+  "names": 597,
+  "bytes": 4079120,
+  "gzipBytes": 165245,
+  "sha256": "bc092a5becdf13c3b3a3068369ae631abc6422a42d89ae52034e7494c244e227"
+}
