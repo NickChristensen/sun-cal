@@ -102,6 +102,8 @@ export default {
     }
 
     try {
+      // Keep the window tied to one UTC day, even if the UV request crosses midnight.
+      const calendarDay = DateTime.utc().startOf("day");
       const uvForecast = await getUvForecast(
         latitudeParam as string,
         longitudeParam as string,
@@ -110,7 +112,7 @@ export default {
         ctx
       );
 
-      const sunEvents = buildSunEvents(latitude, longitude, height, tzOffset);
+      const sunEvents = buildSunEvents(latitude, longitude, height, tzOffset, calendarDay);
       const uvEvent = buildUvEvent(uvForecast, minUv, tzOffset);
 
       const calendar = ical({ name: "☀️ Sun" });
@@ -224,7 +226,8 @@ function buildSunEvents(
   latitude: number,
   longitude: number,
   height: number,
-  tzOffset: number
+  tzOffset: number,
+  calendarDay: DateTime
 ) {
   const events = [] as {
     id: string;
@@ -235,8 +238,13 @@ function buildSunEvents(
   }[];
 
   for (let offset = -180; offset < 180; offset += 1) {
-    const currentDate = DateTime.utc().plus({ days: offset }).toJSDate();
-    const times = SunCalc.getTimes(currentDate, latitude, longitude, height);
+    const currentDay = calendarDay.plus({ days: offset });
+    // SunCalc selects the nearest solar cycle. Approximate local solar noon
+    // selects this intended day even at +/-180 longitude; UTC noon alone can
+    // select the adjacent day. UIDs continue to use the intended UTC date.
+    const solarAnchor = currentDay.plus({ hours: 12 - longitude / 15 }).toJSDate();
+    const currentDate = currentDay.toJSDate();
+    const times = SunCalc.getTimes(solarAnchor, latitude, longitude, height);
 
     events.push(
       {

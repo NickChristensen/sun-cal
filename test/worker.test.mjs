@@ -13,7 +13,6 @@ const config = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8'
 const compatibilityDate = config.match(/^compatibility_date\s*=\s*"([^"]+)"/m)[1];
 const compatibilityFlags = JSON.parse(config.match(/^compatibility_flags\s*=\s*(\[[^\n]+\])/m)[1]);
 const endpoint = 'https://sun-cal.invalid/sun-cal.ics?latitude=30.48&longitude=-97.65&height=800&tz=-6';
-const cacheKey = 'https://cache.sun-cal/uv?lat=30.48&lng=-97.65&alt=800';
 const summary = 'Sun, UV; \\ ☀️\nSecond line';
 const description = 'Unicode 🌅 █ 𝟬; comma, backslash \\ and newline\n'.repeat(12);
 let mf;
@@ -30,6 +29,46 @@ function eventsFrom(body) {
       const colon = line.indexOf(':');
       return [line.slice(0, colon), line.slice(colon + 1)];
     })));
+}
+
+function withoutStamp(event) {
+  const { DTSTAMP, ...fields } = event;
+  return fields;
+}
+
+async function solarEvents(url = endpoint, now = baseline.now, zone = 'UTC') {
+  const response = await mf.dispatchFetch(url, {
+    headers: { 'x-test-now': now, 'x-test-zone': zone },
+  });
+  assert.equal(response.status, 200, await response.clone().text());
+  return eventsFrom(await response.text())
+    .filter(event => !event.UID.includes('peak-uv')).map(withoutStamp);
+}
+
+function locationEndpoint(latitude, longitude, tz = 0) {
+  return `https://sun-cal.invalid/sun-cal.ics?latitude=${latitude}&longitude=${longitude}&height=800&tz=${tz}`;
+}
+
+function isoDateFromIcal(value) {
+  return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}T${value.slice(9, 11)}:${value.slice(11, 13)}:${value.slice(13, 15)}Z`;
+}
+
+function assertSolarWindow(events, firstDay, lastDay) {
+  assert.equal(events.length, 720);
+  assert.equal(new Set(events.map(event => event.UID)).size, 720);
+  assert.equal(events[0].UID, `sun-cal-sunrise-${firstDay}`);
+  assert.equal(events.at(-1).UID, `sun-cal-sunset-${lastDay}`);
+  const first = Date.parse(`${firstDay}T00:00:00Z`);
+  for (let index = 0; index < 360; index += 1) {
+    const day = new Date(first + index * 86400000).toISOString().slice(0, 10);
+    for (const [position, kind] of [[0, 'sunrise'], [1, 'sunset']]) {
+      const event = events[index * 2 + position];
+      assert.equal(event.UID, `sun-cal-${kind}-${day}`);
+      assert.match(event.DTSTART, /^\d{8}T\d{6}Z$/);
+      assert.match(event.DTEND, /^\d{8}T\d{6}Z$/);
+      assert.ok(event.DTSTART < event.DTEND);
+    }
+  }
 }
 
 function assertCalendarLines(body) {
@@ -68,9 +107,28 @@ before(async () => {
         import worker from './src/index.ts';
         import ical from 'ical-generator';
         import { Settings } from 'luxon';
-        Settings.now = () => Date.parse(${JSON.stringify(baseline.now)});
         Settings.defaultLocale = 'en-US';
+        let clockNow;
+        let nextNow;
+        let uvClockAdvanced;
+        const cachePrototype = Object.getPrototypeOf(caches.default);
+        const originalMatch = cachePrototype.match;
+        cachePrototype.match = async function(...args) {
+          const cached = await originalMatch.apply(this, args);
+          const url = new URL(typeof args[0] === 'string' ? args[0] : args[0].url);
+          if (nextNow && url.hostname === 'cache.sun-cal' && url.pathname === '/uv') {
+            clockNow = Date.parse(nextNow);
+            nextNow = null;
+            uvClockAdvanced = true;
+          }
+          return cached;
+        };
         export default { async fetch(request, env, ctx) {
+          clockNow = Date.parse(request.headers.get('x-test-now') || ${JSON.stringify(baseline.now)});
+          nextNow = request.headers.get('x-test-next-now');
+          uvClockAdvanced = false;
+          Settings.now = () => clockNow;
+          Settings.defaultZone = request.headers.get('x-test-zone') || 'UTC';
           if (new URL(request.url).pathname === '/__serializer') {
             const calendar = ical({ name: 'Escaping test' });
             calendar.createEvent({
@@ -85,11 +143,19 @@ before(async () => {
           const shape = request.headers.get('x-test-fixture');
           const fixture = shape === 'empty' ? [] : shape === 'envelope'
             ? { result: ${JSON.stringify(forecast)} } : ${JSON.stringify(forecast)};
-          await caches.default.put(${JSON.stringify(cacheKey)}, new Response(
+          const params = new URL(request.url).searchParams;
+          const cacheKey = 'https://cache.sun-cal/uv?lat=' + encodeURIComponent(params.get('latitude'))
+            + '&lng=' + encodeURIComponent(params.get('longitude'))
+            + '&alt=' + encodeURIComponent(params.get('height'));
+          await caches.default.put(cacheKey, new Response(
             shape === 'invalid-json' ? '{' : JSON.stringify(fixture),
             { headers: { 'Cache-Control': 'max-age=1800' } }
           ));
-          return worker.fetch(request, env, ctx);
+          const response = await worker.fetch(request, env, ctx);
+          if (request.headers.has('x-test-next-now')) {
+            response.headers.set('x-test-uv-clock-advanced', String(uvClockAdvanced));
+          }
+          return response;
         }};
       `,
     },
@@ -143,12 +209,86 @@ test('both supported UV cache shapes produce the same events', async () => {
   const arrayResponse = await mf.dispatchFetch(endpoint);
   const envelopeResponse = await mf.dispatchFetch(endpoint, { headers: { 'x-test-fixture': 'envelope' } });
   assert.equal(envelopeResponse.status, 200);
-  const withoutStamp = event => {
-    const { DTSTAMP, ...fields } = event;
-    return fields;
-  };
   assert.deepEqual(eventsFrom(await arrayResponse.text()).map(withoutStamp),
     eventsFrom(await envelopeResponse.text()).map(withoutStamp));
+});
+
+test('solar events are stable for a UTC day across longitudes, including both date-line edges', async () => {
+  for (const [name, latitude, longitude] of [
+    ['Austin', 30.48, -97.65],
+    ['Greenwich', 51.48, 0],
+    ['Tokyo', 35.68, 139.69],
+    ['Auckland', -36.85, 174.76],
+    ['Honolulu', 21.31, -157.86],
+    ['east date line', -17.7, 180],
+    ['west date line', -17.7, -180],
+  ]) {
+    const url = locationEndpoint(latitude, longitude);
+    const morning = await solarEvents(url, '2026-10-16T00:00:00Z');
+    assertSolarWindow(morning, '2026-04-19', '2027-04-13');
+    for (const now of ['2026-10-16T12:00:00Z', '2026-10-16T23:59:59.999Z']) {
+      assert.deepEqual(await solarEvents(url, now), morning, `${name}: ${now}`);
+    }
+    // In these non-polar locations the dawn/sunset start, expressed as local
+    // mean solar time, belongs to its UID's date. This catches a stable but
+    // wrong adjacent solar cycle at the date line.
+    for (const event of morning) {
+      const localSolarDate = new Date(Date.parse(isoDateFromIcal(event.DTSTART))
+        + longitude * 4 * 60000).toISOString().slice(0, 10);
+      assert.equal(localSolarDate, event.UID.slice(-10), name);
+    }
+  }
+});
+
+test('UTC midnight shifts the exact 360-day window while overlapping events stay identical', async () => {
+  for (const longitude of [-180, -97.65, 180]) {
+    const url = locationEndpoint(30.48, longitude);
+    const previous = await solarEvents(url, '2026-10-16T23:59:59.999Z');
+    const next = await solarEvents(url, '2026-10-17T00:00:00Z');
+    assertSolarWindow(previous, '2026-04-19', '2027-04-13');
+    assertSolarWindow(next, '2026-04-20', '2027-04-14');
+    assert.deepEqual(previous.slice(2), next.slice(0, -2));
+  }
+});
+
+test('the entire solar window uses the request day when the UV cache read crosses UTC midnight', async () => {
+  const expected = await solarEvents(endpoint, '2026-10-16T23:59:59.999Z');
+  const response = await mf.dispatchFetch(endpoint, {
+    headers: {
+      'x-test-now': '2026-10-16T23:59:59.999Z',
+      'x-test-next-now': '2026-10-17T00:00:00Z',
+    },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('x-test-uv-clock-advanced'), 'true');
+  const actual = eventsFrom(await response.text())
+    .filter(event => !event.UID.includes('peak-uv')).map(withoutStamp);
+  assert.deepEqual(actual, expected);
+});
+
+test('DST transition dates and default timezones do not change solar instants or UID dates', async () => {
+  for (const [date, latitude, longitude, zone] of [
+    ['2026-03-08', 30.48, -97.65, 'America/Chicago'],
+    ['2026-11-01', 30.48, -97.65, 'America/Chicago'],
+    ['2026-04-05', -36.85, 174.76, 'Pacific/Auckland'],
+    ['2026-09-27', -36.85, 174.76, 'Pacific/Auckland'],
+  ]) {
+    const url = locationEndpoint(latitude, longitude);
+    const midnight = await solarEvents(url, `${date}T00:00:00Z`);
+    assert.deepEqual(await solarEvents(url, `${date}T12:00:00Z`, zone), midnight);
+    assert.deepEqual(await solarEvents(url, `${date}T23:59:59.999Z`, 'Pacific/Kiritimati'), midnight);
+  }
+});
+
+test('numeric tz remains a fixed description offset without changing solar instants or UIDs', async () => {
+  const utc = await solarEvents(locationEndpoint(30.48, -97.65, 0));
+  const shifted = await solarEvents(locationEndpoint(30.48, -97.65, -6));
+  const withoutDescription = event => {
+    const { DESCRIPTION, ...fields } = event;
+    return fields;
+  };
+  assert.deepEqual(shifted.map(withoutDescription), utc.map(withoutDescription));
+  assert.notEqual(shifted[0].DESCRIPTION, utc[0].DESCRIPTION);
 });
 
 test('empty forecasts and an unmet min-uv threshold omit only the UV event', async () => {

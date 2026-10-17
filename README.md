@@ -70,3 +70,18 @@ wrangler deploy
 
 - UV data is cached at the edge for 30 minutes per `latitude/longitude/height`.
 - Event timestamps are UTC; description text uses `tz` to format local time.
+- The solar window uses the UTC date when the request starts: 180 days before
+  through 179 days after that date (360 days, two solar events per day).
+  Each date's sunrise/sunset uses its local solar cycle, independent of the
+  request time or `tz`. Solar UIDs retain the intended date even when the event
+  timestamp falls on an adjacent UTC date. `tz` is a fixed description offset,
+  not a timezone or daylight-saving rule.
+- At the date line, `+180` and `-180` intentionally label opposite sides of the
+  same meridian: a given UID date selects the solar cycle on that side's local
+  solar date, so their event timestamps differ by one day. Longitudes are not
+  normalized into a different date-label convention.
+- Solar calculations now consistently select the intended date's solar cycle.
+  Previously the request time could select an adjacent cycle, changing event
+  times under the same UID during the day. Existing UIDs may receive corrected
+  event times once when this fix is deployed; subsequent requests remain stable
+  for each intended date.
