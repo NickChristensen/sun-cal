@@ -32,7 +32,11 @@ jobs:
       - name: Run tests
         run: npm test
       - name: Validate Worker bundle
-        run: ./node_modules/.bin/wrangler deploy --dry-run
+        env:
+          CF_SEND_TELEMETRY: "false"
+          DO_NOT_TRACK: "1"
+          WRANGLER_SEND_METRICS: "false"
+        run: npm run deploy:dry-run
 
   deploy:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' }}
@@ -82,4 +86,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: ./node_modules/.bin/wrangler deploy
+          CF_SEND_TELEMETRY: "false"
+          DO_NOT_TRACK: "1"
+          WRANGLER_SEND_METRICS: "false"
+        run: npm run deploy

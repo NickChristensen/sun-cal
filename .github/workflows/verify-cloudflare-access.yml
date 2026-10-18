@@ -24,6 +24,7 @@ jobs:
           import os
           import ssl
           import sys
+          import urllib.parse
 
           EXPECTED_ACCOUNT_ID = "311170064ca42bf2b861a7d78ccf4f2a"
           WORKER_NAME = "sun-cal"
@@ -52,9 +53,9 @@ jobs:
                   "deployments",
               ),
               (
-                  "workers_subdomain",
-                  f"{account_path}/workers/subdomain",
-                  "subdomain",
+                  "worker_hostname",
+                  f"{account_path}/workers/workers/{WORKER_NAME}",
+                  "worker_hostname",
               ),
           ]
           if CHECK_HEALTH_DATABASE:
@@ -74,11 +75,41 @@ jobs:
                   return isinstance(result, dict)
               if kind == "deployments":
                   return isinstance(result, dict) and isinstance(result.get("deployments"), list)
-              if kind == "subdomain":
+              if kind == "worker_hostname":
+                  if not isinstance(result, dict):
+                      return False
+                  subdomain = result.get("subdomain")
+                  if not isinstance(subdomain, dict) or subdomain.get("enabled") is not True:
+                      return False
+                  url = subdomain.get("url")
+                  if not isinstance(url, str):
+                      return False
+                  parsed = urllib.parse.urlsplit(url)
+                  try:
+                      port = parsed.port
+                  except ValueError:
+                      return False
+                  hostname = parsed.hostname or ""
+                  labels = hostname.split(".")
+                  zone_label = labels[1] if len(labels) == 4 else ""
                   return (
-                      isinstance(result, dict)
-                      and isinstance(result.get("subdomain"), str)
-                      and bool(result["subdomain"].strip())
+                      parsed.scheme == "https"
+                      and parsed.username is None
+                      and parsed.password is None
+                      and parsed.netloc.lower() == hostname
+                      and port is None
+                      and "?" not in url
+                      and "#" not in url
+                      and parsed.query == ""
+                      and parsed.fragment == ""
+                      and parsed.path in ("", "/")
+                      and len(labels) == 4
+                      and labels[0] == WORKER_NAME
+                      and labels[2:] == ["workers", "dev"]
+                      and bool(zone_label)
+                      and zone_label[0] != "-"
+                      and zone_label[-1] != "-"
+                      and all(character.isascii() and (character.isalnum() or character == "-") for character in zone_label)
                   )
               if kind == "health_database":
                   return (
@@ -114,7 +145,8 @@ jobs:
                   document = json.loads(body)
                   if not isinstance(document, dict) or document.get("success") is not True:
                       return False, "invalid_response"
-                  if not result_is_valid(kind, document.get("result")):
+                  validation = result_is_valid(kind, document.get("result"))
+                  if not validation:
                       return False, "invalid_response"
                   return True, status
               except (http.client.HTTPException, OSError, TimeoutError):
