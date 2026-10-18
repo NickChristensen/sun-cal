@@ -29,14 +29,20 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci
+      - name: Check TypeScript
+        run: npm run typecheck
       - name: Run tests
         run: npm test
       - name: Validate Worker bundle
         env:
+          SENTRY_RELEASE: ${{ github.sha }}
           CF_SEND_TELEMETRY: "false"
           DO_NOT_TRACK: "1"
           WRANGLER_SEND_METRICS: "false"
         run: npm run deploy:dry-run
+
+      - name: Validate immutable release artifacts
+        run: node scripts/sentry-release.mjs prepare
 
   deploy:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' }}
@@ -81,12 +87,45 @@ jobs:
             echo "::error::CLOUDFLARE_ACCOUNT_ID is missing or does not match the expected account."
             exit 1
           fi
-      - name: Deploy Worker
+      - name: Validate and stage runtime Sentry binding
         if: steps.current.outputs.deploy == 'true'
         env:
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+          SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+        run: node scripts/sentry-release.mjs configure
+      - name: Build exact production artifacts and private maps
+        if: steps.current.outputs.deploy == 'true'
+        run: node scripts/sentry-release.mjs prepare
+      - name: Upload matching Sentry release artifacts
+        if: steps.current.outputs.deploy == 'true'
+        env:
+          SENTRY_ORG: nick-3u
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+        run: node scripts/sentry-release.mjs upload
+      - name: Verify artifacts before deployment
+        if: steps.current.outputs.deploy == 'true'
+        run: node scripts/sentry-release.mjs verify
+      - name: Recheck production head after source-map upload
+        if: steps.current.outputs.deploy == 'true'
+        id: ready
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/master" --jq '.object.sha')"
+          if [ "$current_sha" = "$GITHUB_SHA" ]; then
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'deploy=false' >> "$GITHUB_OUTPUT"
+            echo 'A newer production commit exists; skipping this deployment.'
+          fi
+      - name: Deploy Worker
+        if: steps.current.outputs.deploy == 'true' && steps.ready.outputs.deploy == 'true'
+        env:
+          SENTRY_RELEASE: ${{ github.sha }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CF_SEND_TELEMETRY: "false"
           DO_NOT_TRACK: "1"
           WRANGLER_SEND_METRICS: "false"
-        run: npm run deploy
+        run: npm run deploy -- --prebuilt --secrets-file .sentry-build/runtime-secrets.json
