@@ -1,0 +1,145 @@
+name: Verify Cloudflare Access
+
+on:
+  push:
+    branches:
+      - codex/github-actions-deploy
+  workflow_dispatch:
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/codex/github-actions-deploy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Verify read access to configured Cloudflare resources
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          python3 - <<'PY'
+          import http.client
+          import json
+          import os
+          import ssl
+          import sys
+
+          EXPECTED_ACCOUNT_ID = "311170064ca42bf2b861a7d78ccf4f2a"
+          WORKER_NAME = "sun-cal"
+          CHECK_HEALTH_DATABASE = False
+          DATABASE_UUID = "15049db8-16c5-4eea-83f3-6c096ccc560d"
+          DATABASE_NAME = "health-production"
+          MAX_RESPONSE_BYTES = 65536
+
+          token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+          account_secret = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+          token_is_valid = bool(token) and token.isascii() and all(
+              33 <= ord(character) <= 126 for character in token
+          )
+          account_is_valid = account_secret == EXPECTED_ACCOUNT_ID
+
+          account_path = f"/client/v4/accounts/{EXPECTED_ACCOUNT_ID}"
+          endpoints = [
+              (
+                  "worker_settings",
+                  f"{account_path}/workers/scripts/{WORKER_NAME}/settings",
+                  "object",
+              ),
+              (
+                  "worker_deployments",
+                  f"{account_path}/workers/scripts/{WORKER_NAME}/deployments",
+                  "deployments",
+              ),
+              (
+                  "workers_subdomain",
+                  f"{account_path}/workers/subdomain",
+                  "subdomain",
+              ),
+          ]
+          if CHECK_HEALTH_DATABASE:
+              endpoints.append((
+                  "database",
+                  f"{account_path}/d1/database/{DATABASE_UUID}",
+                  "health_database",
+              ))
+
+          if not token_is_valid or not account_is_valid:
+              for label, _, _ in endpoints:
+                  print(f"{label}: FAIL (credential_config_error)")
+              sys.exit(1)
+
+          def result_is_valid(kind, result):
+              if kind == "object":
+                  return isinstance(result, dict)
+              if kind == "deployments":
+                  return isinstance(result, dict) and isinstance(result.get("deployments"), list)
+              if kind == "subdomain":
+                  return (
+                      isinstance(result, dict)
+                      and isinstance(result.get("subdomain"), str)
+                      and bool(result["subdomain"].strip())
+                  )
+              if kind == "health_database":
+                  return (
+                      isinstance(result, dict)
+                      and result.get("uuid") == DATABASE_UUID
+                      and result.get("name") == DATABASE_NAME
+                  )
+              return False
+
+          def check_endpoint(path, kind):
+              connection = None
+              try:
+                  connection = http.client.HTTPSConnection(
+                      "api.cloudflare.com",
+                      timeout=20,
+                      context=ssl.create_default_context(),
+                  )
+                  connection.request(
+                      "GET",
+                      path,
+                      headers={
+                          "Authorization": "Bearer " + token,
+                          "Accept": "application/json",
+                      },
+                  )
+                  response = connection.getresponse()
+                  status = response.status
+                  if status < 200 or status >= 300:
+                      return False, status
+                  body = response.read(MAX_RESPONSE_BYTES + 1)
+                  if len(body) > MAX_RESPONSE_BYTES:
+                      return False, "invalid_response"
+                  document = json.loads(body)
+                  if not isinstance(document, dict) or document.get("success") is not True:
+                      return False, "invalid_response"
+                  if not result_is_valid(kind, document.get("result")):
+                      return False, "invalid_response"
+                  return True, status
+              except (http.client.HTTPException, OSError, TimeoutError):
+                  return False, "transport_error"
+              except Exception:
+                  return False, "request_error"
+              finally:
+                  if connection is not None:
+                      try:
+                          connection.close()
+                      except Exception:
+                          pass
+
+          failed = False
+          for label, path, kind in endpoints:
+              passed, outcome = check_endpoint(path, kind)
+              if passed:
+                  print(f"{label}: PASS (HTTP {outcome})")
+              elif isinstance(outcome, int):
+                  print(f"{label}: FAIL (HTTP {outcome})")
+                  failed = True
+              else:
+                  print(f"{label}: FAIL ({outcome})")
+                  failed = True
+
+          if failed:
+              sys.exit(1)
+          PY
