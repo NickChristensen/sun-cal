@@ -119,6 +119,10 @@ wrangler secret put OPENUV_API_KEY
 wrangler deploy
 ```
 
+## GitHub Actions
+
+Pull requests run `npm ci`, the test suite, and a Wrangler dry-run. Every push to `master`, including a merge, runs these checks. A queued run skips deployment if a newer commit is now at the production branch head. Production deployment stays disabled until the repository variable `CLOUDFLARE_DEPLOY_ENABLED` is set to `true` and the repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are configured. Set the account ID secret to `311170064ca42bf2b861a7d78ccf4f2a`. Before enabling deployment, review the token's persistent access and scope it to this account with `Workers Scripts: Edit`; this workers.dev service needs no zone permissions. Keep `OPENUV_API_KEY` in Cloudflare Worker secrets; the workflow does not upload runtime secrets.
+
 ## Notes
 
 - UV data is cached at the edge for 30 minutes per `latitude/longitude/height`.
