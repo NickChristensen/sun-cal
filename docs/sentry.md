@@ -12,51 +12,32 @@ Each event contains a fixed diagnostic category and bounded stack locations from
 
 The existing HTTP error response can contain the upstream error message. This change preserves that response behavior; Sentry receives a fixed diagnostic category.
 
-## Required production configuration
+## Production configuration and exact-build source maps
 
-| Name | Location | Purpose |
+The Sentry project is **sun-cal** (ID **4512279041212416**) in organization **nick-3u**, owned by the existing **#nick** team: [project events](https://nick-3u.sentry.io/issues/?project=4512279041212416). The project uses JavaScript error monitoring. Alert configuration and automatic Linear tickets are maintained separately.
+
+Configure these GitHub Actions values before merging:
+
+| Name | Storage | Purpose |
 | --- | --- | --- |
-| `SENTRY_DSN` | Cloudflare Worker secret | Routes errors to the approved SunCal Sentry project. Missing configuration leaves the Worker usable without sending events. |
-| `SENTRY_RELEASE` | Build/deploy environment, passed to the Worker as a nonsecret binding | Full 40-character Git commit SHA. GitHub Actions provides the exact production commit. |
-| `SENTRY_LOCAL_SOURCEMAPS` | Local build environment | Set to `1` with `deploy:dry-run` to generate source maps for local review and a later approved upload. |
-| `OPENUV_API_KEY` | Existing Cloudflare Worker secret | Existing upstream access; this value is never sent to Sentry. |
+| `SENTRY_PROJECT` | Repository variable | Must equal `sun-cal`; the helper refuses another service's project. |
+| `SENTRY_DSN` | Repository variable | The approved public SDK ingestion DSN, validated against the exact organization host and project ID. It grants ingestion only, not privileged Sentry API access. |
+| `SENTRY_AUTH_TOKEN` | Repository secret | Owner-provisioned CI upload credential. Approved scope is `org:ci` for source-map uploads, release creation, and code mappings across `nick-3u`. Never expose it to the Worker, repository files, logs, or pull-request validation. |
 
-The matching Sentry project and DSN were not available in the supplied project inventory. Project creation and credential setup require a separate approved handoff. Record the verified project URL here after setup. No project URL or credential value is embedded in the repository.
+GitHub Actions installs the DSN as the Worker's **`SENTRY_DSN` secret binding** with the same production code deployment. It generates a Git-ignored mode-600 `.sentry-build/runtime-secrets.json` and supplies `--secrets-file` to the deploy command. Existing Worker secrets are preserved. This avoids a separate `secret put`, which would immediately deploy a configuration-only Worker version before the production gates were satisfied. A staged repository variable is not evidence that the binding is live; verify the active version after deployment. Do not print DSN values in task output.
 
-After approval, an operator must select or create the matching SunCal project, verify its organization and project ID, and provision its DSN through the existing Cloudflare secret-management process. A DSN from another service must not be used. Do not print secret values in terminal transcripts, GitHub Actions logs, this document, or Linear.
+`node scripts/sentry-release.mjs configure` validates the approved organization and project mapping without printing the DSN. The production job runs it before the final build. `prepare` builds the production bundle and private source map once, validates map completeness, and hashes the build output, static assets, and staged runtime configuration. Pull-request validation runs `prepare` without credentials or uploads.
 
-For manual releases, set `SENTRY_RELEASE` to the full SHA of the reviewed commit used for the build. A production merge or push runs the existing deployment workflow. Merging and deploying require a separate decision; this instrumentation PR does not perform them.
+The production-only `upload` step uses pinned `@sentry/cli@3.8.0`, fixed organization `nick-3u`, the selected project, the exact runtime release, and canonical bundle URI `app:///index.js`. It validates the maps, fails on upload errors, and waits for Sentry processing. It does not inject debug IDs or modify the deployed bundle. Source maps contain repository and dependency source code; their upload to Sentry and the private map modules sent to Cloudflare require owner approval.
 
-## Stack traces and source maps
+After upload, `verify` checks all artifact/runtime hashes again. GitHub Actions rechecks the production branch head, then deploys the prepared output without rebuilding (`cf deploy --prebuilt`, or a generated Wrangler configuration with the custom build command removed). Missing configuration, an upload failure, or changed artifacts prevents deployment. A newer production head skips deployment. The upload token is available only in the upload step.
 
-The filter retains known application filenames and bounded line/column positions, so stack locations remain available without exception payloads. Generated bundle frames use `app:///index.js`; already named application source frames retain their source filename. Source-map artifacts must match the exact release and retained bundle filename. Artifact upload is a separate setup step that requires approval for Sentry access.
+For credential-free local review, run `node scripts/sentry-release.mjs prepare` and `node scripts/sentry-release.mjs verify` under Node 22. Generated manifests, maps, prebuilt configuration, and runtime-secret files remain ignored by Git. Do not add the privileged upload token to local test fixtures.
 
-From a clean checkout of the reviewed release commit, build local artifacts without deployment:
-
-```sh
-export SENTRY_RELEASE="$(git rev-parse HEAD)"
-SENTRY_LOCAL_SOURCEMAPS=1 npm run deploy:dry-run
-```
-
-The bundle and map are `.cloudflare/output/v0/workers/default/bundle/index.js` and `index.js.map`. Both are ignored by Git. A normal build leaves source-map upload disabled. Setting `SENTRY_LOCAL_SOURCEMAPS=1` on a real deployment would also enable Cloudflare's source-map upload, so use the flag with the dry-run command until that upload is approved.
-
-Required upload configuration names are `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT`, and `SENTRY_RELEASE`. The token belongs in the approved upload environment and must never become a Worker binding. Confirm the correct project and review access scope before provisioning ongoing credentials. No source maps are uploaded by the PR validation job or this task.
-
-This configuration uses Sentry's supported [release-based artifact matching](https://docs.sentry.io/platforms/javascript/sourcemaps/troubleshooting_js/legacy-uploading-methods/) because it does not inject debug IDs into the deployed bundle. After approval, create or verify the release in the selected project and use the Sentry CLI in the approved environment to upload the artifacts from that exact build with matching release and prefix:
-
-```sh
-sentry-cli releases new "$SENTRY_RELEASE" \
-  --org "$SENTRY_ORG" --project "$SENTRY_PROJECT"
-sentry-cli sourcemaps upload \
-  --org "$SENTRY_ORG" --project "$SENTRY_PROJECT" \
-  --release "$SENTRY_RELEASE" --url-prefix 'app:///' \
-  .cloudflare/output/v0/workers/default/bundle
-```
-
-Verify a controlled event resolves to the original application file and line after upload. A local review of this change exercised the generated Worker through a blocked outbound transport and mapped its retained bundle positions back to `src/index.ts` with the generated map. This verifies local build compatibility; external upload and Sentry symbolication remain unverified.
+After deployment, correlate the GitHub production commit/release with the active Cloudflare version, verify `SENTRY_DSN` exists on that version, and use bounded non-mutating smoke checks. Confirm ingestion and readable original file/line/function frames with safe sanitized synthetic data only where feasible. Do not add a public test route, transmit user payloads, induce user-visible failures, or change business behavior. Builds, upload completion, and local intercepted fixtures alone do not prove live ingestion or server-side symbolication.
 
 ## Verification
 
 Run `npm run typecheck`, `npm test`, and `npm run deploy:dry-run`. The Sentry tests execute the real Worker and SDK against a local transport with inert credentials. They inspect complete envelopes for routing, environment, release, one report per failure, and removal of private test markers. They also check existing response behavior and disabled capture without configuration. Network destinations are blocked or handled by local fixtures; the suite does not send an event to Sentry.
 
-After the approved setup and deployment, exercise a controlled failure in a separate test environment through the same Worker entry point. Use synthetic data and verify the project, `production` environment, commit release, redaction, and readable stack in Sentry before recording the issue link. Do not add a public production test route. This task does not claim live-event verification or completion of the production setup portion of TODO-89.
+After configuration and deployment, exercise a controlled failure in a separate test environment through the same Worker entry point. Use synthetic data and verify the project, `production` environment, commit release, redaction, and readable stack in Sentry before recording the issue link. Do not add a public production test route. This task does not claim live-event verification or completion of the production setup portion of TODO-89.
