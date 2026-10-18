@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import moment from 'moment-timezone';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { build } from 'esbuild';
 import { Miniflare, Response as LocalResponse } from 'miniflare';
 import ICAL from 'ical.js';
@@ -21,6 +22,10 @@ const description = 'Unicode 🌅 █ 𝟬; comma, backslash \\ and newline\n'.r
 let mf;
 let script;
 let outboundAttempts = 0;
+const testArtifactRoot = join(root, '.wrangler');
+mkdirSync(testArtifactRoot, { recursive: true });
+const scriptDirectory = mkdtempSync(join(testArtifactRoot, 'worker-test-'));
+const scriptPath = join(scriptDirectory, 'index.js');
 
 function unfold(body) {
   return body.replace(/\r\n[ \t]/g, '');
@@ -50,6 +55,76 @@ async function cacheRequest(url = endpoint, headers = {}) {
     counts: JSON.parse(response.headers.get('x-test-counts')),
     key: response.headers.get('x-test-solar-key'),
   };
+}
+
+function sentryReports(response) {
+  return JSON.parse(response.headers.get('x-test-sentry-envelopes') || '[]');
+}
+
+function parseSentryReport(report) {
+  const lines = report.body.split(/\r?\n/).filter(Boolean);
+  assert.equal(lines.length, 3, 'one event envelope contains only its header, item header and event');
+  return {
+    endpoint: new URL(report.url),
+    header: JSON.parse(lines[0]),
+    item: JSON.parse(lines[1]),
+    event: JSON.parse(lines[2]),
+    serialized: report.body,
+  };
+}
+
+function assertSentryError(response, classification) {
+  const reports = sentryReports(response);
+  assert.equal(reports.length, 1, 'one captured failure produces one event envelope');
+  const report = parseSentryReport(reports[0]);
+  assert.equal(report.endpoint.origin, 'https://o1.ingest.sentry.io');
+  assert.equal(report.endpoint.pathname, '/api/42/envelope/');
+  assert.equal(report.endpoint.searchParams.get('sentry_key'), 'publictestkey');
+  assert.equal(report.item.type, 'event');
+  assert.equal(report.header.trace, undefined, 'inbound baggage is not copied to the envelope trace header');
+  assert.deepEqual(Object.keys(report.event).sort(), [
+    'environment', 'event_id', 'exception', 'level', 'platform', 'release', 'sdk', 'tags', 'timestamp',
+  ]);
+  assert.equal(report.event.environment, 'production');
+  assert.equal(report.event.release, sentryBindings.SENTRY_RELEASE);
+  assert.deepEqual(report.event.tags, { service: 'sun-cal', diagnostic: classification });
+  assert.equal(report.event.exception.values.length, 1);
+  assert.equal(report.event.exception.values[0].type, 'WorkerError');
+  assert.equal(report.event.exception.values[0].value, classification);
+  assert.deepEqual(report.event.sdk, {
+    name: 'sentry.javascript.cloudflare',
+    version: '11.6.0',
+    integrations: [],
+    packages: [{ name: 'npm:@sentry/cloudflare', version: '11.6.0' }],
+  }, 'the SDK adds only its fixed package identity after beforeSend');
+  const frames = report.event.exception.values[0].stacktrace?.frames || [];
+  assert.ok(frames.length <= 12);
+  for (const frame of frames) {
+    assert.ok([
+      'app:///index.js',
+      'app:///src/index.ts',
+      'app:///src/timezones.ts',
+      'app:///src/sentry.ts',
+    ].includes(frame.filename), frame.filename);
+    assert.ok(Number.isInteger(frame.lineno) && frame.lineno > 0 && frame.lineno <= 100_000);
+    if ('colno' in frame) assert.ok(Number.isInteger(frame.colno) && frame.colno > 0 && frame.colno <= 1_000_000);
+    if ('function' in frame) {
+      assert.ok(['default.fetch', 'Object.fetch', 'fetch', 'parseDisplayTimezone', 'getSolarCalendar',
+        'getUvForecast', 'fetchWithRetries', 'buildSunEvents', 'calendarDigest', 'buildUvEvent',
+        'formatSunTime', 'regionalLabel', 'createEventId', 'createBarChartLine', 'sleep'].includes(frame.function));
+    }
+  }
+  return report;
+}
+
+const sentryBindings = {
+  OPENUV_API_KEY: 'INERT_TEST_KEY',
+  SENTRY_DSN: 'https://publictestkey@o1.ingest.sentry.io/42',
+  SENTRY_RELEASE: '0123456789abcdef0123456789abcdef01234567',
+};
+
+function sentryWorker(bindings = sentryBindings) {
+  return localWorker(bindings);
 }
 
 function withTimezone(value) {
@@ -125,6 +200,7 @@ function localWorker(bindings = { OPENUV_API_KEY: 'INERT_TEST_KEY' }) {
   return new Miniflare({
     modules: true,
     script,
+    scriptPath,
     compatibilityDate,
     compatibilityFlags,
     cf: false,
@@ -147,9 +223,11 @@ before(async () => {
       loader: 'ts',
       contents: `
         import worker from './src/index.ts';
+        import { withSentry } from './src/sentry.ts';
         import ical, { ICalCalendar, ICalEvent } from 'ical-generator';
         import SunCalc from 'suncalc';
         import { Settings } from 'luxon';
+        import * as Sentry from '@sentry/cloudflare';
         Settings.defaultLocale = 'en-US';
         let clockNow;
         let nextNow;
@@ -162,6 +240,32 @@ before(async () => {
         let solarContainsUv;
         let digestCalls;
         let hashFailure;
+        let readErrorMessage;
+        let readErrorKind;
+        let sentryEnvelopes = [];
+        let uvCacheMiss = false;
+        let uvCacheWriteFailure = false;
+        let seedingUvFixture = false;
+        const unhandledTestHandler = withSentry({
+          async fetch() {
+            throw new Error(readErrorMessage, { cause: new Error('PRIVATE_CAUSE_SECRET') });
+          },
+        });
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = async function(input, init = {}) {
+          const url = new URL(input instanceof Request ? input.url : String(input));
+          if (url.hostname === 'o1.ingest.sentry.io') {
+            const body = typeof init.body === 'string' ? init.body
+              : init.body instanceof Uint8Array ? new TextDecoder().decode(init.body)
+              : input instanceof Request ? await input.clone().text() : '';
+            sentryEnvelopes.push({ url: url.href, body });
+            return new Response('', { status: 200 });
+          }
+          if (url.hostname === 'api.openuv.io' && uvCacheMiss) {
+            return new Response('{"result":[]}', { headers: { 'Content-Type': 'application/json' } });
+          }
+          return originalFetch(input, init);
+        };
         let legacyCachePresent;
         const subtlePrototype = Object.getPrototypeOf(crypto.subtle);
         const originalDigest = subtlePrototype.digest;
@@ -192,6 +296,10 @@ before(async () => {
         const originalDelete = cachePrototype.delete;
         cachePrototype.match = async function(...args) {
           const url = new URL(typeof args[0] === 'string' ? args[0] : args[0].url);
+          if (url.pathname === '/uv' && uvCacheMiss) {
+            counts.uvReads += 1;
+            return undefined;
+          }
           if (url.pathname.startsWith('/solar/')) {
             counts.solarReads += 1;
             solarKey = url.href;
@@ -200,10 +308,10 @@ before(async () => {
               await originalDelete.call(this, args[0]);
               return undefined;
             }
-            if (solarMode === 'v2-only') {
+            if (solarMode === 'v3-only') {
               const current = await originalMatch.apply(this, args);
               const legacy = new URL(url);
-              legacy.pathname = '/solar/v2';
+              legacy.pathname = '/solar/v3';
               const headers = new Headers(current.headers);
               headers.set('X-Sun-Cal-Key', legacy.href);
               await originalPut.call(this, legacy.href, new Response(current.body, { headers }));
@@ -211,7 +319,13 @@ before(async () => {
               legacyCachePresent = Boolean(await originalMatch.call(this, legacy.href));
               return originalMatch.apply(this, args);
             }
-            if (solarMode === 'read-error') throw new Error('Synthetic cache read failure');
+            if (solarMode === 'read-error') {
+              if (readErrorKind === 'object') {
+                throw { token: 'PRIVATE_OBJECT_TOKEN_SECRET', body: 'PRIVATE_OBJECT_BODY_SECRET' };
+              }
+              if (readErrorKind === 'primitive') throw 'PRIVATE_PRIMITIVE_SECRET';
+              throw new Error(readErrorMessage, { cause: new Error('PRIVATE_CAUSE_SECRET') });
+            }
             if (['corrupt', 'empty', 'body-error'].includes(solarMode)) {
               const body = solarMode === 'body-error'
                 ? new ReadableStream({ start(controller) { controller.error(new Error('Synthetic body failure')); } })
@@ -252,6 +366,9 @@ before(async () => {
         };
         cachePrototype.put = function(key, response) {
           const url = new URL(typeof key === 'string' ? key : key.url);
+          if (url.pathname === '/uv' && !seedingUvFixture && uvCacheWriteFailure) {
+            return Promise.reject(new Error(readErrorMessage));
+          }
           if (!url.pathname.startsWith('/solar/')) return originalPut.call(this, key, response);
           counts.solarWrites += 1;
           solarKey = url.href;
@@ -266,6 +383,8 @@ before(async () => {
         };
         export default { async fetch(request, env, ctx) {
           solarMode = request.headers.get('x-test-solar-cache') || 'bypass';
+          readErrorMessage = request.headers.get('x-test-error-message') || 'Synthetic cache read failure';
+          readErrorKind = request.headers.get('x-test-error-kind') || 'error';
           sunTimesFixture = JSON.parse(request.headers.get('x-test-sun-times') || 'null');
           counts = { sunCalc: 0, solarSerializations: 0, uvSerializations: 0,
             calendarSerializations: 0, solarReads: 0, solarWrites: 0, uvReads: 0 };
@@ -274,6 +393,8 @@ before(async () => {
           solarContainsUv = false;
           digestCalls = 0;
           hashFailure = request.headers.has('x-test-hash-failure');
+          uvCacheMiss = request.headers.has('x-test-uv-cache-miss');
+          uvCacheWriteFailure = request.headers.has('x-test-uv-write-error');
           legacyCachePresent = false;
           clockNow = Date.parse(request.headers.get('x-test-now') || ${JSON.stringify(baseline.now)});
           nextNow = request.headers.get('x-test-next-now');
@@ -303,21 +424,68 @@ before(async () => {
           const cacheKey = 'https://cache.sun-cal/uv?lat=' + encodeURIComponent(params.get('latitude'))
             + '&lng=' + encodeURIComponent(params.get('longitude'))
             + '&alt=' + encodeURIComponent(params.get('height'));
-          await caches.default.put(cacheKey, new Response(
-            shape === 'invalid-json' ? '{' : JSON.stringify(fixture),
-            { headers: { 'Cache-Control': 'max-age=1800' } }
-          ));
+          if (!uvCacheMiss) {
+            seedingUvFixture = true;
+            try {
+              await caches.default.put(cacheKey, new Response(
+                shape === 'invalid-json' ? '{' : JSON.stringify(fixture),
+                { headers: { 'Cache-Control': 'max-age=1800' } }
+              ));
+            } finally {
+              seedingUvFixture = false;
+            }
+          }
           const pending = [];
-          const response = await worker.fetch(request, env, {
+          sentryEnvelopes = [];
+          const workerContext = {
             waitUntil(promise) { pending.push(promise); ctx.waitUntil(promise); },
+          };
+          let response;
+          const selectedWorker = request.headers.has('x-test-unhandled') ? unhandledTestHandler : worker;
+          const invokeWorker = () => selectedWorker.fetch(request, env, workerContext);
+          const invokeWithOptionalScopePollution = () => request.headers.has('x-test-scope-pollution')
+            ? Sentry.withScope(async scope => {
+              scope.setUser({ id: 'PRIVATE_USER_SECRET', email: 'private@example.invalid' });
+              scope.setTag('private_tag', 'PRIVATE_TAG_SECRET');
+              scope.setExtra('private_extra', 'PRIVATE_EXTRA_SECRET');
+              scope.setContext('private_context', { token: 'PRIVATE_CONTEXT_SECRET' });
+              scope.addBreadcrumb({
+                category: 'private', message: 'PRIVATE_BREADCRUMB_SECRET',
+                data: { body: 'PRIVATE_BREADCRUMB_DATA_SECRET' },
+              });
+              scope.addAttachment({ filename: 'private.txt', data: 'PRIVATE_ATTACHMENT_SECRET' });
+              return invokeWorker();
+            })
+            : invokeWorker();
+          try {
+            response = await invokeWithOptionalScopePollution();
+          } catch (error) {
+            if (!request.headers.has('x-test-unhandled')) throw error;
+            response = new Response('Test harness caught an expected unhandled error', { status: 599 });
+          }
+          const responseBody = await response.text();
+          response = new Response(responseBody, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
           });
-          await Promise.all(pending);
+          const backgroundResults = await Promise.allSettled(pending);
+          const rejectedBackgrounds = backgroundResults.filter(result => result.status === 'rejected');
+          if (!uvCacheWriteFailure && rejectedBackgrounds.length) throw rejectedBackgrounds[0].reason;
+          if (uvCacheWriteFailure && (rejectedBackgrounds.length !== 1 ||
+              !(rejectedBackgrounds[0].reason instanceof Error) ||
+              rejectedBackgrounds[0].reason.message !== readErrorMessage)) {
+            throw new Error('Unexpected UV cache background rejection');
+          }
           response.headers.set('x-test-counts', JSON.stringify(counts));
           response.headers.set('x-test-solar-key', solarKey);
           response.headers.set('x-test-solar-ttl', solarTtl);
           response.headers.set('x-test-solar-contains-uv', String(solarContainsUv));
           response.headers.set('x-test-digest-calls', String(digestCalls));
           response.headers.set('x-test-legacy-cache-present', String(legacyCachePresent));
+          response.headers.set('x-test-sentry-envelopes', JSON.stringify(sentryEnvelopes));
+          response.headers.set('x-test-background-rejections', String(rejectedBackgrounds.length));
+          response.headers.set('x-test-pending-count', String(pending.length));
           if (request.headers.has('x-test-next-now')) {
             response.headers.set('x-test-uv-clock-advanced', String(uvClockAdvanced));
           }
@@ -332,12 +500,14 @@ before(async () => {
     write: false,
   });
   script = bundled.outputFiles[0].text;
+  writeFileSync(scriptPath, script);
   mf = localWorker();
   await mf.ready;
 });
 
 after(async () => {
   await mf?.dispose();
+  rmSync(scriptDirectory, { recursive: true, force: true });
   assert.equal(outboundAttempts, 0, 'no test attempted an outbound request');
 });
 
@@ -507,8 +677,191 @@ test('missing API key remains a configuration error', async () => {
     const response = await unconfigured.dispatchFetch(endpoint);
     assert.equal(response.status, 500);
     assert.equal(await response.text(), 'Server misconfigured');
+    assert.deepEqual(sentryReports(response), []);
+    assert.equal(response.headers.get('x-test-pending-count'), '0');
   } finally {
     await unconfigured.dispose();
+  }
+});
+
+test('Sentry captures handled and unhandled errors through the real Worker SDK wrapper', async () => {
+  const worker = sentryWorker();
+  try {
+    const configured = await worker.dispatchFetch(endpoint, {
+      headers: { 'x-test-solar-cache': 'read-error' },
+    });
+    assert.equal(configured.status, 200);
+    assertSentryError(configured, 'solar_cache_read_failed');
+
+    const backgroundSolar = await worker.dispatchFetch(endpoint, {
+      headers: { 'x-test-solar-cache': 'write-error' },
+    });
+    assert.equal(backgroundSolar.status, 200);
+    assert.equal(backgroundSolar.headers.get('x-test-background-rejections'), '0');
+    assertSentryError(backgroundSolar, 'solar_cache_write_failed');
+
+    const backgroundUv = await worker.dispatchFetch(endpoint, {
+      headers: {
+        'x-test-uv-cache-miss': 'true',
+        'x-test-uv-write-error': 'true',
+        'x-test-solar-cache': 'use',
+      },
+    });
+    assert.equal(backgroundUv.status, 200);
+    assert.equal(backgroundUv.headers.get('x-test-background-rejections'), '1',
+      'the UV cache write rejection remains observable after capture');
+    assertSentryError(backgroundUv, 'uv_cache_write_failed');
+
+    const missingKey = sentryWorker({
+      SENTRY_DSN: sentryBindings.SENTRY_DSN,
+      SENTRY_RELEASE: sentryBindings.SENTRY_RELEASE,
+    });
+    try {
+      const configuration = await missingKey.dispatchFetch(endpoint);
+      assert.equal(configuration.status, 500);
+      assert.equal(await configuration.text(), 'Server misconfigured');
+      assertSentryError(configuration, 'worker_configuration_error');
+    } finally {
+      await missingKey.dispose();
+    }
+
+    const invalidJson = await worker.dispatchFetch(endpoint, {
+      headers: { 'x-test-fixture': 'invalid-json' },
+    });
+    assert.equal(invalidJson.status, 502);
+    assert.match(await invalidJson.text(), /^Failed to build calendar: /);
+    const invalidJsonReport = assertSentryError(invalidJson, 'calendar_build_failed');
+    const invalidJsonFrames = invalidJsonReport.event.exception.values[0].stacktrace.frames;
+    assert.ok(invalidJsonFrames.length > 0, 'a real calendar failure retains bounded stack frames');
+    assert.ok(invalidJsonFrames.some(frame => frame.colno), 'a retained frame includes its bundle column');
+
+    const unhandled = await worker.dispatchFetch(endpoint, {
+      headers: {
+        'x-test-unhandled': 'true',
+        'x-test-error-message': 'PRIVATE_UNHANDLED_MESSAGE',
+      },
+    });
+    assert.equal(unhandled.status, 599, 'the test harness catches the intentionally unhandled fixture');
+    assert.equal(await unhandled.text(), 'Test harness caught an expected unhandled error');
+    assertSentryError(unhandled, 'worker_unhandled');
+  } finally {
+    await worker.dispose();
+  }
+});
+
+test('Sentry reports omit request data, arbitrary errors, scope data and hostile trace baggage', async () => {
+  const worker = sentryWorker();
+  try {
+    const attack = [
+      'PRIVATE_QUERY_EMAIL_SECRET',
+      'PRIVATE_QUERY_TOKEN_SECRET',
+      'PRIVATE_QUERY_LOCATION_SECRET',
+      'PRIVATE_QUERY_AMOUNT_SECRET',
+      'PRIVATE_AUTH_SECRET',
+      'PRIVATE_COOKIE_SECRET',
+      'PRIVATE_HEADER_TOKEN_SECRET',
+      'PRIVATE_EXCEPTION_MESSAGE',
+      'PRIVATE_CAUSE_SECRET',
+      'PRIVATE_USER_SECRET',
+      'private@example.invalid',
+      'PRIVATE_TAG_SECRET',
+      'PRIVATE_EXTRA_SECRET',
+      'PRIVATE_CONTEXT_SECRET',
+      'PRIVATE_BREADCRUMB_SECRET',
+      'PRIVATE_BREADCRUMB_DATA_SECRET',
+      'PRIVATE_ATTACHMENT_SECRET',
+      'PRIVATE_OBJECT_TOKEN_SECRET',
+      'PRIVATE_OBJECT_BODY_SECRET',
+      'PRIVATE_PRIMITIVE_SECRET',
+      'attacker-release',
+      'attacker-environment',
+      'private-transaction-path',
+    ];
+    const attackUrl = 'https://sun-cal.invalid/sun-cal.ics?latitude=44.123456&longitude=-123.654321' +
+      '&height=800&tz=-6&email=PRIVATE_QUERY_EMAIL_SECRET&token=PRIVATE_QUERY_TOKEN_SECRET' +
+      '&address=PRIVATE_QUERY_LOCATION_SECRET&amount=PRIVATE_QUERY_AMOUNT_SECRET';
+    const response = await worker.dispatchFetch(attackUrl, {
+      headers: {
+        'x-test-solar-cache': 'read-error',
+        'x-test-error-message': 'PRIVATE_EXCEPTION_MESSAGE',
+        'x-test-scope-pollution': 'true',
+        authorization: 'Bearer PRIVATE_AUTH_SECRET',
+        cookie: 'session=PRIVATE_COOKIE_SECRET',
+        'x-api-token': 'PRIVATE_HEADER_TOKEN_SECRET',
+        'sentry-trace': '0123456789abcdef0123456789abcdef-0123456789abcdef-1',
+        baggage: 'sentry-release=attacker-release,sentry-environment=attacker-environment,' +
+          'sentry-user_segment=PRIVATE_USER_SECRET,sentry-transaction=private-transaction-path',
+      },
+    });
+    assert.equal(response.status, 200);
+    const report = assertSentryError(response, 'solar_cache_read_failed');
+    assert.equal(report.event.request, undefined);
+    assert.equal(report.event.user, undefined);
+    assert.equal(report.event.breadcrumbs, undefined);
+    assert.equal(report.event.extra, undefined);
+    assert.equal(report.event.contexts, undefined);
+    assert.equal(report.event.transaction, undefined);
+    assert.equal(report.event.debug_meta, undefined);
+    assert.equal(report.event.sdkProcessingMetadata, undefined);
+    assert.equal(report.event.exception.values[0].cause, undefined);
+    for (const secret of attack) assert.ok(!report.serialized.includes(secret), secret);
+
+    for (const [kind, secrets] of [
+      ['object', ['PRIVATE_OBJECT_TOKEN_SECRET', 'PRIVATE_OBJECT_BODY_SECRET']],
+      ['primitive', ['PRIVATE_PRIMITIVE_SECRET']],
+    ]) {
+      const arbitrary = await worker.dispatchFetch(endpoint, {
+        headers: {
+          'x-test-solar-cache': 'read-error',
+          'x-test-error-kind': kind,
+        },
+      });
+      assert.equal(arbitrary.status, 200);
+      assert.match(await arbitrary.text(), /^BEGIN:VCALENDAR/);
+      const arbitraryReport = assertSentryError(arbitrary, 'solar_cache_read_failed');
+      for (const secret of secrets) assert.ok(!arbitraryReport.serialized.includes(secret), secret);
+    }
+  } finally {
+    await worker.dispose();
+  }
+});
+
+test('Sentry stays silent for success and validation, and skips missing or invalid DSNs', async () => {
+  const worker = sentryWorker();
+  try {
+    const success = await worker.dispatchFetch(endpoint);
+    assert.equal(success.status, 200);
+    assert.deepEqual(sentryReports(success), []);
+
+    for (const [url, init, status] of [
+      [endpoint + '&min-uv=-1', {}, 400],
+      ['https://sun-cal.invalid/missing', {}, 404],
+      [endpoint, { method: 'POST' }, 405],
+    ]) {
+      const response = await worker.dispatchFetch(url, init);
+      assert.equal(response.status, status);
+      assert.deepEqual(sentryReports(response), [], `${status} responses are not captured`);
+    }
+  } finally {
+    await worker.dispose();
+  }
+
+  for (const bindings of [
+    { OPENUV_API_KEY: 'INERT_TEST_KEY' },
+    { OPENUV_API_KEY: 'INERT_TEST_KEY', SENTRY_DSN: 'not a DSN' },
+    { OPENUV_API_KEY: 'INERT_TEST_KEY', SENTRY_DSN: 'https://public@not-sentry.example/42' },
+    { OPENUV_API_KEY: 'INERT_TEST_KEY', SENTRY_DSN: 'https://publictestkey@o1.ingest.sentry.io/not-numeric' },
+    { OPENUV_API_KEY: 'INERT_TEST_KEY', SENTRY_DSN: `https://publictestkey@o1.ingest.sentry.io/${'4'.repeat(513)}` },
+  ]) {
+    const disabled = sentryWorker(bindings);
+    try {
+      const response = await disabled.dispatchFetch(endpoint.replace('tz=-6', 'tz=nope'));
+      assert.equal(response.status, 400);
+      assert.deepEqual(sentryReports(response), []);
+      assert.equal(response.headers.get('x-test-pending-count'), '0');
+    } finally {
+      await disabled.dispose();
+    }
   }
 });
 
@@ -556,7 +909,7 @@ test('solar keys canonicalize numbers, ignore min-uv, and isolate every render o
     assert.equal(hit.key, base.key);
     assert.equal(hit.counts.sunCalc, 0);
   }
-  assert.equal(new URL(base.key).pathname, '/solar/v3');
+  assert.equal(new URL(base.key).pathname, '/solar/v4');
   for (const [url, headers] of [
     [endpoint.replace('latitude=30.48', 'latitude=30.49'), {}],
     [endpoint.replace('longitude=-97.65', 'longitude=-97.66'), {}],
@@ -802,7 +1155,7 @@ test('named cache modes, canonical aliases and daily keys preserve hits and fres
   const chicago = withTimezone('America/Chicago');
   const base = await cacheRequest(chicago, { 'x-test-solar-cache': 'reset' });
   const key = new URL(base.key);
-  assert.equal(key.pathname, '/solar/v3');
+  assert.equal(key.pathname, '/solar/v4');
   assert.equal(key.searchParams.get('tzMode'), 'iana');
   assert.equal(key.searchParams.get('tz'), 'America/Chicago');
   assert.equal(key.searchParams.get('tzData'), '2026e');
@@ -852,11 +1205,11 @@ test('named cache modes, canonical aliases and daily keys preserve hits and fres
   assert.deepEqual(base.events.slice(2, 720).map(withoutStamp), rollover.events.slice(0, 718).map(withoutStamp));
 });
 
-test('v2 entries cannot satisfy v3 reads and named offsets stay ASCII under another numbering system', async () => {
+test('v3 entries cannot satisfy v4 reads and named offsets stay ASCII under another numbering system', async () => {
   await cacheRequest(endpoint, { 'x-test-solar-cache': 'reset' });
-  const miss = await cacheRequest(endpoint, { 'x-test-solar-cache': 'v2-only' });
+  const miss = await cacheRequest(endpoint, { 'x-test-solar-cache': 'v3-only' });
   assert.equal(miss.response.headers.get('x-test-legacy-cache-present'), 'true');
-  assert.equal(new URL(miss.key).pathname, '/solar/v3');
+  assert.equal(new URL(miss.key).pathname, '/solar/v4');
   assert.equal(miss.counts.sunCalc, 360);
   assert.equal(miss.counts.solarSerializations, 720);
   assert.equal((await cacheRequest()).counts.sunCalc, 0);

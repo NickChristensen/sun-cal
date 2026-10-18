@@ -121,7 +121,9 @@ npm run deploy
 
 ## GitHub Actions
 
-Pull requests run `npm ci`, the test suite, and `npm run deploy:dry-run`. Every push to `master`, including a merge, runs these checks. A queued run skips deployment if a newer commit is now at the production branch head. Production deployment stays disabled until the repository variable `CLOUDFLARE_DEPLOY_ENABLED` is set to `true` and the repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are configured. Set the account ID secret to `311170064ca42bf2b861a7d78ccf4f2a`. Before enabling deployment, review the token's persistent access and scope it to this account with `Workers Scripts: Edit`; this workers.dev service needs no zone permissions. Keep `OPENUV_API_KEY` in Cloudflare Worker secrets; the workflow does not upload runtime secrets.
+See [Sentry error reporting](docs/sentry.md) for privacy rules, required production configuration, local verification, and the separate Sentry setup handoff.
+
+Pull requests run `npm ci`, `npm run typecheck`, the test suite, and `npm run deploy:dry-run`. Every push to `master`, including a merge, runs these checks. A queued run skips deployment if a newer commit is now at the production branch head. Production deployment stays disabled until the repository variable `CLOUDFLARE_DEPLOY_ENABLED` is set to `true` and the repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are configured. Set the account ID secret to `311170064ca42bf2b861a7d78ccf4f2a`. Before enabling deployment, review the token's persistent access and scope it to this account with `Workers Scripts: Edit`; this workers.dev service needs no zone permissions. Keep `OPENUV_API_KEY` in Cloudflare Worker secrets; the workflow does not upload runtime secrets.
 
 ## Notes
 
@@ -133,7 +135,7 @@ Pull requests run `npm ci`, the test suite, and `npm run deploy:dry-run`. Every 
   namespace. `min-uv` does not fragment this solar cache. Bump
   `SOLAR_CACHE_VERSION` when solar calculations, window rules, formatting or
   serialization, runtime compatibility or timezone-data assumptions change;
-  prior versions expire naturally. Rendering uses namespace `v3`; named keys
+  prior versions expire naturally. Rendering uses namespace `v4` for the Sentry SDK's Node compatibility update; named keys
   also include the pinned IANA release and asset digest.
 - A solar cache hit skips astronomy and serialization of all 720 solar events.
   UV keeps its independent 30-minute forecast cache, and its event is rendered

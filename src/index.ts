@@ -1,10 +1,11 @@
 import ical, { foldLines } from "ical-generator";
 import { DateTime, FixedOffsetZone } from "luxon";
 import SunCalc from "suncalc";
+import { captureWorkerError, isSentryDsn, withSentry, type SentryEnv } from "./sentry";
 import { canonicalTimezone, namedEventDates, regionalTime, requireTimezoneCoverage,
   timezoneComponent, TIMEZONE_ASSET_VERSION, TIMEZONE_DATA_VERSION } from "./timezones";
 
-interface Env {
+interface Env extends SentryEnv {
   OPENUV_API_KEY: string;
 }
 
@@ -25,7 +26,7 @@ type DisplayTimezone =
 
 const UV_CACHE_TTL_SECONDS = 60 * 30;
 // Bump this namespace when solar calculation, window, or serialization changes.
-const SOLAR_CACHE_VERSION = "v3";
+const SOLAR_CACHE_VERSION = "v4";
 const SOLAR_CACHE_TTL_SECONDS = 60 * 60 * 24;
 const CALENDAR_END = "END:VCALENDAR";
 const UV_MAX_RETRIES = 6;
@@ -48,7 +49,7 @@ const FIXED_WIDTH_CHARS: Record<string, string> = {
   M: "𝗆",
 };
 
-export default {
+const workerHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
@@ -61,6 +62,7 @@ export default {
     }
 
     if (!env.OPENUV_API_KEY) {
+      captureWorkerError(new Error("Worker configuration is missing"), "worker_configuration_error");
       return new Response("Server misconfigured", { status: 500 });
     }
 
@@ -147,9 +149,20 @@ export default {
         },
       });
     } catch (error) {
+      captureWorkerError(error, "calendar_build_failed");
       const message = error instanceof Error ? error.message : "Unknown error";
       return new Response(`Failed to build calendar: ${message}`, { status: 502 });
     }
+  },
+};
+
+const sentryHandler = withSentry({ ...workerHandler });
+
+export default {
+  fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    return isSentryDsn(env.SENTRY_DSN)
+      ? sentryHandler.fetch(request, env, ctx)
+      : workerHandler.fetch(request, env, ctx);
   },
 };
 
@@ -207,8 +220,9 @@ async function getSolarCalendar(
         return body;
       }
     }
-  } catch {
+  } catch (error) {
     // The solar cache is an optimization; read failures must not break the feed.
+    captureWorkerError(error, "solar_cache_read_failed");
   }
 
   const calendar = ical({ name: "☀️ Sun" });
@@ -235,9 +249,12 @@ async function getSolarCalendar(
         "X-Sun-Cal-SHA256": await calendarDigest(body),
       },
     });
-    ctx.waitUntil(cache.put(cacheKey, cached).catch(() => {}));
-  } catch {
+    ctx.waitUntil(cache.put(cacheKey, cached).catch((error) => {
+      captureWorkerError(error, "solar_cache_write_failed");
+    }));
+  } catch (error) {
     // Synchronous write/setup failures likewise leave the generated feed usable.
+    captureWorkerError(error, "solar_cache_write_failed");
   }
   return body;
 }
@@ -263,12 +280,13 @@ async function getUvForecast(
 
   const cached = await cache.match(cacheKey);
   if (cached) {
-    const cachedData = await cached.json();
+    const cachedData: unknown = await cached.json();
     if (Array.isArray(cachedData)) {
       return cachedData as UvForecastItem[];
     }
-    if (cachedData && Array.isArray(cachedData.result)) {
-      return cachedData.result as UvForecastItem[];
+    if (cachedData && typeof cachedData === "object" &&
+        Array.isArray((cachedData as { result?: unknown }).result)) {
+      return (cachedData as { result: UvForecastItem[] }).result;
     }
   }
 
@@ -291,7 +309,10 @@ async function getUvForecast(
     },
   });
 
-  ctx.waitUntil(cache.put(cacheKey, responseToCache));
+  ctx.waitUntil(cache.put(cacheKey, responseToCache).catch((error) => {
+    captureWorkerError(error, "uv_cache_write_failed");
+    throw error;
+  }));
 
   return forecast;
 }
@@ -411,8 +432,8 @@ function buildUvEvent(uvForecast: UvForecastItem[], minUv: number, timezone: Dis
 
   const maxUv = Math.max(...roundedValues.map((item) => item.uv));
   const maxUvTimeRange = roundedValues.filter((item) => item.uv === maxUv);
-  const start = DateTime.min(...maxUvTimeRange.map((item) => item.hour)).toUTC();
-  const end = DateTime.max(...maxUvTimeRange.map((item) => item.hour))
+  const start = DateTime.min(...maxUvTimeRange.map((item) => item.hour))!.toUTC();
+  const end = DateTime.max(...maxUvTimeRange.map((item) => item.hour))!
     .plus({ hours: 1 })
     .toUTC();
 

@@ -7,9 +7,11 @@
     "dev": "cf dev",
     "deploy": "cf deploy",
     "test": "node --test test/*.test.mjs",
-    "deploy:dry-run": "cf deploy --dry-run"
+    "deploy:dry-run": "cf deploy --dry-run",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@sentry/cloudflare": "11.6.0",
     "ical-generator": "11.1.2",
     "luxon": "^3.5.0",
     "moment": "2.31.0",
@@ -17,10 +19,14 @@
     "suncalc": "^1.9.0"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "5.20261010.1",
+    "@types/luxon": "3.7.6",
+    "@types/suncalc": "1.9.2",
+    "cf": "1.0.0-beta.12",
     "esbuild": "0.17.19",
     "ical.js": "2.2.1",
     "miniflare": "3.20250718.3",
-    "wrangler": "4.147.0",
-    "cf": "1.0.0-beta.12"
+    "typescript": "5.9.3",
+    "wrangler": "4.147.0"
   }
 }

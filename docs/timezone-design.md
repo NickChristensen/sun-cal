@@ -58,9 +58,9 @@ conversion and assets together as rules change, well before reaching the guard.
 
 ## Cache and composition
 
-Solar namespace v3 includes mode/canonical zone, IANA version and asset digest,
+Solar namespace v4 includes mode/canonical zone, IANA version and asset digest,
 alongside existing date, coordinates, height and resolved formatting inputs.
-Aliases share keys; numeric and named modes do not. Older v2 entries cannot hit.
+Aliases share keys; numeric and named modes do not. Older v2/v3 entries cannot hit. The v4 bump covers the Sentry SDK's Node compatibility update.
 Regenerate asset metadata for data changes and bump namespace for serialization
 changes. Keep SHA256 integrity and best-effort cache fallback.
 
