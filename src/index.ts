@@ -26,7 +26,7 @@ type DisplayTimezone =
 
 const UV_CACHE_TTL_SECONDS = 60 * 30;
 // Bump this namespace when solar calculation, window, or serialization changes.
-const SOLAR_CACHE_VERSION = "v4";
+const SOLAR_CACHE_VERSION = "v5";
 const SOLAR_CACHE_TTL_SECONDS = 60 * 60 * 24;
 const CALENDAR_END = "END:VCALENDAR";
 const UV_MAX_RETRIES = 6;
@@ -406,11 +406,7 @@ function formatSunTime(date: Date, timezone: DisplayTimezone): string {
   }
   const pinned = regionalTime(date.valueOf(), timezone.zone);
   const local = utc.setZone(FixedOffsetZone.instance(pinned.utcOffset()));
-  return `${local.toLocaleString(DateTime.TIME_SIMPLE)} (${regionalLabel(local, timezone.zone)})`;
-}
-
-function regionalLabel(date: DateTime, zone: string): string {
-  return `${zone}, UTC${date.toFormat("ZZ", { numberingSystem: "latn" })}`;
+  return local.toLocaleString(DateTime.TIME_SIMPLE);
 }
 
 function buildUvEvent(uvForecast: UvForecastItem[], minUv: number, timezone: DisplayTimezone) {
@@ -466,8 +462,7 @@ function createBarChartLine({ hour, uv }: UvHour, minUv: number, timezone: Displ
 
   const barLength = Math.max(uv - (minUv - 1), 0);
   const bar = new Array(barLength).fill("█").join("");
-  const label = timezone.mode === "iana" ? ` (${regionalLabel(local, timezone.zone)})` : "";
-  return `${fixedWidthTime}${label} ${bar} ${uv}`;
+  return `${fixedWidthTime} ${bar} ${uv}`;
 }
 
 function sleep(ms: number) {

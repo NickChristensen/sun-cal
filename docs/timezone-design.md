@@ -1,8 +1,7 @@
 # SunCal named timezone decision (TODO-85 / TODO-86)
 
 Status: accepted after research review; Nick approved the narrow second-fold UTC
-exception. This supersedes the earlier UTC-plus-hint-only representation.
-Actual Apple/Google presentation remains a separate client gate.
+exception. Apple/Google presentation requires client verification.
 
 ## Representation and compatibility
 
@@ -24,7 +23,7 @@ when either endpoint is in a backward-clock interval's **second occurrence**,
 write both endpoints as UTC. This approved exception preserves the second
 instant without shifting, omitting, splitting or duplicating events. First
 occurrences, spring crossings and unambiguous transition crossings keep TZID.
-Descriptions still show the requested region and per-instant UTC offset.
+Descriptions show local times.
 An exceptional event may retain a GMT source label in clients.
 
 Use the public explicit event timezone API with correctly zoned Moment values
@@ -45,8 +44,9 @@ bugs. Pins, reproduction and sizes: [timezone-assets.md](timezone-assets.md).
 
 Descriptions derive fixed per-instant offsets from the same pinned data. Named
 Luxon/Intl reconversion can reintroduce stale legislative rules. Named UV rows
-retain minutes and explicit ASCII offsets, including Kathmandu, Lord Howe and
-each row of a repeated hour. Numeric descriptions retain their existing format.
+show hours and minutes, including Kathmandu and Lord Howe. Each forecast hour
+has its own row, including separate rows with identical local time labels during
+a repeated hour. Numeric UV rows show hours.
 
 Guard the selected solar date window and every actual solar/UV endpoint within
 **2006-01-01T00:00Z inclusive to 2088-01-01T00:00Z exclusive**. Outside coverage,
@@ -58,9 +58,10 @@ conversion and assets together as rules change, well before reaching the guard.
 
 ## Cache and composition
 
-Solar namespace v4 includes mode/canonical zone, IANA version and asset digest,
-alongside existing date, coordinates, height and resolved formatting inputs.
-Aliases share keys; numeric and named modes do not. Older v2/v3 entries cannot hit. The v4 bump covers the Sentry SDK's Node compatibility update.
+Solar namespace v5 includes mode/canonical zone, IANA version and asset digest,
+alongside date, coordinates, height and resolved formatting inputs.
+Aliases share keys; numeric and named modes have separate keys. Cache reads and
+writes use the rendering namespace.
 Regenerate asset metadata for data changes and bump namespace for serialization
 changes. Keep SHA256 integrity and best-effort cache fallback.
 

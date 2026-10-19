@@ -30,9 +30,10 @@ For events and descriptions that follow Chicago daylight-saving rules, replace
 https://<your-subdomain>.workers.dev/sun-cal.ics?latitude=30.48&longitude=-97.65&height=800&min-uv=1&tz=America%2FChicago
 ```
 
-Existing numeric subscriptions keep their fixed-offset descriptions. Named
-subscriptions use the canonical regional name and each event/hour's UTC offset;
+Numeric `tz` values use fixed offsets. Named descriptions show local times;
 UV rows include minutes, including fractional-offset regions such as Kathmandu.
+Each forecast hour has its own UV row, including separate rows with identical
+local time labels during a backward-clock transition.
 Slash-containing region/alias identifiers, `Etc/*`, and `UTC` are supported when
 present in the pinned IANA 2026e data. Bare abbreviations such as `CST`,
 `local`/`system`, offset strings such as `+05:30`, and unsupported names return HTTP 400 before
@@ -44,9 +45,8 @@ matching `VTIMEZONE`. Their absolute instants and UIDs stay the same as numeric
 feeds; all `DTSTAMP` values remain UTC. One narrow exception preserves exact
 instants: if either endpoint occurs in the second occurrence of a backward-clock
 fold, the entire event uses UTC endpoints. RFC 5545 can only identify the first
-occurrence with an ordinary local TZID value. Descriptions still show the
-requested region and actual offset. First occurrences and other transition
-crossings retain TZID.
+occurrence with an ordinary local TZID value. First occurrences and other
+transition crossings retain TZID.
 
 Named feeds also include `X-WR-TIMEZONE`. Viewers can display events in their own
 zone; source-zone labels and Apple's secondary GMT label still require a client
@@ -134,14 +134,16 @@ Pull requests run `npm ci`, `npm run typecheck`, the test suite, and `npm run de
   resolved locale/numbering system/calendar, and a versioned
   namespace. `min-uv` does not fragment this solar cache. Bump
   `SOLAR_CACHE_VERSION` when solar calculations, window rules, formatting or
-  serialization, runtime compatibility or timezone-data assumptions change;
-  prior versions expire naturally. Rendering uses namespace `v4` for the Sentry SDK's Node compatibility update; named keys
-  also include the pinned IANA release and asset digest.
+  serialization, runtime compatibility or timezone-data assumptions change.
+  Rendering uses namespace `v5`; named keys also include the pinned IANA release
+  and asset digest.
 - A solar cache hit skips astronomy and serialization of all 720 solar events.
   UV keeps its independent 30-minute forecast cache, and its event is rendered
   for every request and appended to the solar calendar. The merged feed keeps
   its existing 30-minute HTTP and iCalendar refresh TTL; it is never stored in
   the daily solar cache.
+- Subscribed calendars fetch feed contents on their clients' polling schedules.
+  One-time imports contain a snapshot of the feed at import time.
 - Solar entries have a maximum age of one day. A new UTC day immediately uses
   a different key, even if the previous entry remains physically cached until
   its TTL expires. Cache storage is per data center and best effort: eviction,
@@ -166,8 +168,5 @@ Pull requests run `npm ci`, `npm run typecheck`, the test suite, and `npm run de
   same meridian: a given UID date selects the solar cycle on that side's local
   solar date, so their event timestamps differ by one day. Longitudes are not
   normalized into a different date-label convention.
-- Solar calculations now consistently select the intended date's solar cycle.
-  Previously the request time could select an adjacent cycle, changing event
-  times under the same UID during the day. Existing UIDs may receive corrected
-  event times once when this fix is deployed; subsequent requests remain stable
-  for each intended date.
+- Solar calculations select the intended date's solar cycle. Each solar UID has
+  stable event times throughout the UTC day.

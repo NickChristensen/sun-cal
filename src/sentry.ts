@@ -43,7 +43,6 @@ const SAFE_FUNCTIONS = new Set([
   "calendarDigest",
   "buildUvEvent",
   "formatSunTime",
-  "regionalLabel",
   "createEventId",
   "createBarChartLine",
   "sleep",
