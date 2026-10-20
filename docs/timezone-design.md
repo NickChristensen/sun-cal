@@ -65,10 +65,9 @@ writes use the rendering namespace.
 Regenerate asset metadata for data changes and bump namespace for serialization
 changes. Keep SHA256 integrity and best-effort cache fallback.
 
-The daily cached named solar calendar contains one VTIMEZONE. Hits skip astronomy
-and solar serialization. UV uses its independent forecast cache and appends only
-its freshly serialized event, retaining one VCALENDAR and existing refresh TTL.
-Never daily-cache the merged response.
+The daily cached named solar calendar contains one VTIMEZONE. Hits skip astronomy and solar serialization. UV appends its freshly serialized event, retaining one VCALENDAR. The independent UV cache uses a versioned key with canonical location/height, timezone mode/value, the local date, and pinned timezone data/assets. Its envelope retains a validated successful forecast until the next local midnight; `fetchedAt` separately controls 30-minute freshness. Named day boundaries use the pinned constant-offset UTC intervals for the local date. Adjacent intervals merge across DST; a historical rollback that briefly enters another date starts a new interval. This keeps repeated or skipped midnights and date changes inside the correct retention boundary.
+
+A failed bounded refresh uses only a validated forecast fetched on the same local day and labels it with its original fetch timestamp. A cold, evicted or invalid entry produces solar-only output when refresh fails. Reads, retries and response composition recheck the local date so the prior day's UV cannot cross midnight. The merged response's HTTP TTL is at most 30 minutes and ends at the next local midnight; iCalendar refresh hints remain 30 minutes. Never daily-cache the merged response. The UTC day captured at request start still anchors the solar window and its cache.
 
 ## Evidence and limitations
 

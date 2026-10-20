@@ -90,8 +90,7 @@ npm test
 ```
 
 Tests run the Worker in local workerd with the compatibility date and flags from
-`wrangler.toml`. Synthetic UV forecasts populate its local cache; outbound
-requests and Cloudflare metadata lookups are disabled. No API key is needed.
+`wrangler.toml`. Synthetic UV forecasts populate its local cache, and upstream refreshes use mocked responses; outbound requests and Cloudflare metadata lookups are disabled. No API key is needed.
 Solar-generation tests bypass the solar cache; separate cache tests count actual
 astronomy and event serialization calls, and exercise UV refreshes and failures.
 Named-zone tests check actual Worker output across DST gaps and both fold
@@ -127,7 +126,10 @@ Pull requests run `npm ci`, `npm run typecheck`, the test suite, and `npm run de
 
 ## Notes
 
-- UV data is cached at the edge for 30 minutes per `latitude/longitude/height`.
+- UV forecasts stay fresh for 30 minutes. A validated successful forecast is retained separately from this freshness rule until the feed timezone's next local midnight. Its versioned Cache API key includes canonical numeric latitude, longitude and height, timezone mode and canonical value, local calendar date, and pinned timezone data versions for named zones. API keys and subscriber identifiers are excluded. Missing `tz` still means fixed UTC, and numeric offsets remain fixed across DST.
+- After freshness expires, a failed refresh can use only a valid forecast fetched on that same local day. Its UV description starts with `Earlier forecast, fetched <UTC timestamp>.` Stale use leaves that timestamp and the stored entry unchanged. Empty, malformed, non-finite or out-of-day forecasts cannot replace usable data. If today's entry is absent, evicted or invalid and refresh fails, the response contains the solar events without a UV event. Local midnight immediately selects a new key and excludes the prior day's UV, including when a retry or solar generation crosses midnight.
+- Refreshes allow at most two attempts, with a one-second timeout per attempt, a 100 ms retry delay and a three-second refresh budget. Transport/read failures, HTTP 429 and HTTP 5xx can retry; other HTTP errors and malformed data stop immediately. This replaces seven attempts with up to 63 seconds of backoff plus seven ten-second request timeouts. The timeout also covers response reads. Responses above 128 KiB are rejected. Charts cap the bar width at 100 characters while retaining the numeric UV value, so very large finite values cannot break calendar generation.
+- UV retention uses an ordinary cache `max-age` through local midnight, while the envelope's original `fetchedAt` controls freshness. It does not rely on retrieving expired entries or on `stale-if-error`, which the [Workers Cache API](https://developers.cloudflare.com/workers/runtime-apis/cache/) does not support. Cache contents remain best effort and local to each data center. Cache errors leave usable output available; no new service or storage binding is required.
 - The already serialized solar calendar is cached separately in the Workers
   Cache API, using the request's UTC day, canonical numeric latitude, longitude,
   height, explicit timezone mode and canonical numeric offset or regional name,
@@ -138,10 +140,7 @@ Pull requests run `npm ci`, `npm run typecheck`, the test suite, and `npm run de
   Rendering uses namespace `v5`; named keys also include the pinned IANA release
   and asset digest.
 - A solar cache hit skips astronomy and serialization of all 720 solar events.
-  UV keeps its independent 30-minute forecast cache, and its event is rendered
-  for every request and appended to the solar calendar. The merged feed keeps
-  its existing 30-minute HTTP and iCalendar refresh TTL; it is never stored in
-  the daily solar cache.
+  UV keeps its independent forecast cache, and its event is rendered for every request and appended to the solar calendar. The merged feed's HTTP cache TTL is at most 30 minutes and is clamped to the next local midnight, using pinned rules for named zones, including 23- and 25-hour days. iCalendar refresh hints remain 30 minutes. The merged feed is never stored in the daily solar cache.
 - Subscribed calendars fetch feed contents on their clients' polling schedules.
   One-time imports contain a snapshot of the feed at import time.
 - Solar entries have a maximum age of one day. A new UTC day immediately uses

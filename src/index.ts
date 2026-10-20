@@ -4,34 +4,23 @@ import SunCalc from "suncalc";
 import { captureWorkerError, isSentryDsn, withSentry, type SentryEnv } from "./sentry";
 import { canonicalTimezone, namedEventDates, regionalTime, requireTimezoneCoverage,
   timezoneComponent, TIMEZONE_ASSET_VERSION, TIMEZONE_DATA_VERSION } from "./timezones";
+import { getUvForecast, localDayHttpMaxAge, localUvDay, type DisplayTimezone,
+  type UvForecastItem } from "./uv";
 
 interface Env extends SentryEnv {
   OPENUV_API_KEY: string;
 }
-
-type UvForecastItem = {
-  uv: number;
-  uv_time: string;
-  [key: string]: unknown;
-};
 
 type UvHour = {
   uv: number;
   hour: DateTime;
 };
 
-type DisplayTimezone =
-  | { mode: "fixed"; offset: number }
-  | { mode: "iana"; zone: string };
-
 const UV_CACHE_TTL_SECONDS = 60 * 30;
 // Bump this namespace when solar calculation, window, or serialization changes.
 const SOLAR_CACHE_VERSION = "v5";
 const SOLAR_CACHE_TTL_SECONDS = 60 * 60 * 24;
 const CALENDAR_END = "END:VCALENDAR";
-const UV_MAX_RETRIES = 6;
-const UV_BACKOFF_START_MS = 1000;
-const UV_REQUEST_TIMEOUT_MS = 10_000;
 
 const FIXED_WIDTH_CHARS: Record<string, string> = {
   0: "𝟬",
@@ -121,31 +110,42 @@ const workerHandler = {
         requireTimezoneCoverage(calendarDay.plus({ days: 180 }).toMillis() - 1);
       }
       const uvForecast = await getUvForecast(
-        latitudeParam as string,
-        longitudeParam as string,
-        heightParam as string,
-        env.OPENUV_API_KEY,
-        ctx
+        latitude, longitude, height, timezone, env.OPENUV_API_KEY, ctx
       );
 
       const solarCalendar = await getSolarCalendar(
         latitude, longitude, height, timezone, calendarDay, ctx
       );
-      const uvEvent = buildUvEvent(uvForecast, minUv, timezone);
+      let uvEvent = null;
+      if (uvForecast && localUvDay(DateTime.utc().toMillis(), timezone).date === uvForecast.localDate) {
+        uvEvent = buildUvEvent(uvForecast.forecast, minUv, timezone);
+        if (uvEvent && uvForecast.stale) {
+          uvEvent.description = `Earlier forecast, fetched ${uvForecast.fetchedAt}.\n${uvEvent.description}`;
+        }
+      }
       // Event.toString() escapes text; foldLines is the public serializer's
       // folding step. Only this dynamic event is rendered on a solar cache hit.
       const uvText = uvEvent ? foldLines(ical().createEvent({ ...uvEvent,
         ...(timezone.mode === "iana" ? namedEventDates(uvEvent.start, uvEvent.end, timezone.zone) : {}),
       }).toString()) : "";
-      const body = uvText
+      let body = uvText
         ? solarCalendar.slice(0, -CALENDAR_END.length) + uvText + CALENDAR_END
         : solarCalendar;
+
+      // Solar generation can take long enough to cross local midnight. Check
+      // the date again before returning so yesterday's UV rows do not escape.
+      const responseNow = DateTime.utc().toMillis();
+      const responseDay = localUvDay(responseNow, timezone);
+      if (uvForecast && uvText && (responseDay.date !== uvForecast.localDate ||
+          Date.parse(uvForecast.fetchedAt) < responseDay.start)) {
+        body = solarCalendar;
+      }
 
       return new Response(body, {
         status: 200,
         headers: {
           "Content-Type": "text/calendar; charset=utf-8",
-          "Cache-Control": `max-age=${UV_CACHE_TTL_SECONDS}`,
+          "Cache-Control": `max-age=${localDayHttpMaxAge(responseNow, timezone)}`,
         },
       });
     } catch (error) {
@@ -189,7 +189,12 @@ async function getSolarCalendar(
   calendarDay: DateTime,
   ctx: ExecutionContext
 ): Promise<string> {
-  const cache = caches.default;
+  let cache: Cache | null = null;
+  try {
+    cache = caches.default;
+  } catch (error) {
+    captureWorkerError(error, "solar_cache_read_failed");
+  }
   const keyUrl = new URL(`https://cache.sun-cal/solar/${SOLAR_CACHE_VERSION}`);
   keyUrl.searchParams.set("day", calendarDay.toISODate() as string);
   keyUrl.searchParams.set("lat", String(latitude));
@@ -208,7 +213,7 @@ async function getSolarCalendar(
   const cacheKey = new Request(keyUrl);
 
   try {
-    const cached = await cache.match(cacheKey);
+    const cached = cache ? await cache.match(cacheKey) : undefined;
     if (cached?.ok && cached.headers.get("X-Sun-Cal-Key") === cacheKey.url) {
       const body = await cached.text();
       // Entries are written only here. Verify identity, boundaries and the
@@ -249,9 +254,9 @@ async function getSolarCalendar(
         "X-Sun-Cal-SHA256": await calendarDigest(body),
       },
     });
-    ctx.waitUntil(cache.put(cacheKey, cached).catch((error) => {
+    ctx.waitUntil(cache?.put(cacheKey, cached).catch((error) => {
       captureWorkerError(error, "solar_cache_write_failed");
-    }));
+    }) ?? Promise.resolve());
   } catch (error) {
     // Synchronous write/setup failures likewise leave the generated feed usable.
     captureWorkerError(error, "solar_cache_write_failed");
@@ -262,96 +267,6 @@ async function getSolarCalendar(
 async function calendarDigest(body: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function getUvForecast(
-  latitudeParam: string,
-  longitudeParam: string,
-  heightParam: string,
-  apiKey: string,
-  ctx: ExecutionContext
-): Promise<UvForecastItem[]> {
-  const cache = caches.default;
-  const cacheKey = new Request(
-    `https://cache.sun-cal/uv?lat=${encodeURIComponent(latitudeParam)}&lng=${encodeURIComponent(
-      longitudeParam
-    )}&alt=${encodeURIComponent(heightParam)}`
-  );
-
-  const cached = await cache.match(cacheKey);
-  if (cached) {
-    const cachedData: unknown = await cached.json();
-    if (Array.isArray(cachedData)) {
-      return cachedData as UvForecastItem[];
-    }
-    if (cachedData && typeof cachedData === "object" &&
-        Array.isArray((cachedData as { result?: unknown }).result)) {
-      return (cachedData as { result: UvForecastItem[] }).result;
-    }
-  }
-
-  const uvUrl = new URL("https://api.openuv.io/api/v1/forecast");
-  uvUrl.searchParams.set("lat", latitudeParam);
-  uvUrl.searchParams.set("lng", longitudeParam);
-  uvUrl.searchParams.set("alt", heightParam);
-
-  const json = await fetchWithRetries(uvUrl.toString(), apiKey);
-
-  if (!json || !Array.isArray(json.result)) {
-    throw new Error("Unexpected openuv response");
-  }
-
-  const forecast = json.result as UvForecastItem[];
-  const responseToCache = new Response(JSON.stringify(forecast), {
-    headers: {
-      "Content-Type": "application/json",
-      "Cache-Control": `max-age=${UV_CACHE_TTL_SECONDS}`,
-    },
-  });
-
-  ctx.waitUntil(cache.put(cacheKey, responseToCache).catch((error) => {
-    captureWorkerError(error, "uv_cache_write_failed");
-    throw error;
-  }));
-
-  return forecast;
-}
-
-async function fetchWithRetries(url: string, apiKey: string): Promise<any> {
-  let lastError: unknown;
-
-  for (let attempt = 0; attempt <= UV_MAX_RETRIES; attempt += 1) {
-    if (attempt > 0) {
-      const delayMs = UV_BACKOFF_START_MS * Math.pow(2, attempt - 1);
-      await sleep(delayMs);
-    }
-
-    try {
-      const response = await fetch(url, {
-        headers: {
-          "x-access-token": apiKey,
-        },
-        signal: AbortSignal.timeout(UV_REQUEST_TIMEOUT_MS),
-      });
-
-      if (!response.ok) {
-        throw new Error(`openuv returned ${response.status}`);
-      }
-
-      const text = await response.text();
-      const json = JSON.parse(text);
-
-      return json;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  if (lastError instanceof Error) {
-    throw lastError;
-  }
-
-  throw new Error("Failed to fetch openuv forecast");
 }
 
 function buildSunEvents(
@@ -460,11 +375,7 @@ function createBarChartLine({ hour, uv }: UvHour, minUv: number, timezone: Displ
     .map((char) => FIXED_WIDTH_CHARS[char] ?? char)
     .join("");
 
-  const barLength = Math.max(uv - (minUv - 1), 0);
+  const barLength = Math.min(Math.max(uv - (minUv - 1), 0), 100);
   const bar = new Array(barLength).fill("█").join("");
   return `${fixedWidthTime} ${bar} ${uv}`;
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
