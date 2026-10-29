@@ -2,8 +2,8 @@ import ical, { foldLines } from "ical-generator";
 import { DateTime, FixedOffsetZone } from "luxon";
 import SunCalc from "suncalc";
 import { captureWorkerError, isSentryDsn, withSentry, type SentryEnv } from "./sentry";
-import { canonicalTimezone, namedEventDates, regionalTime, requireTimezoneCoverage,
-  timezoneComponent, TIMEZONE_ASSET_VERSION, TIMEZONE_DATA_VERSION } from "./timezones";
+import { canonicalTimezone, namedEventDates, regionalOffsetMinutesEast,
+  requireTimezoneCoverage, timezoneComponent, TIMEZONE_ASSET_VERSION, TIMEZONE_DATA_VERSION } from "./timezones";
 import { getUvForecast, localDayHttpMaxAge, localUvDay, type DisplayTimezone,
   type UvForecastItem } from "./uv";
 
@@ -321,8 +321,7 @@ function formatSunTime(date: Date, timezone: DisplayTimezone): string {
   if (timezone.mode === "fixed") {
     return utc.plus({ hours: timezone.offset }).toLocaleString(DateTime.TIME_SIMPLE);
   }
-  const pinned = regionalTime(date.valueOf(), timezone.zone);
-  const local = utc.setZone(FixedOffsetZone.instance(pinned.utcOffset()));
+  const local = utc.setZone(FixedOffsetZone.instance(regionalOffsetMinutesEast(date.valueOf(), timezone.zone)));
   return local.toLocaleString(DateTime.TIME_SIMPLE);
 }
 
@@ -368,7 +367,7 @@ function createEventId(type: string, date: Date) {
 function createBarChartLine({ hour, uv }: UvHour, minUv: number, timezone: DisplayTimezone) {
   const local = timezone.mode === "fixed"
     ? hour.plus({ hours: timezone.offset })
-    : hour.setZone(FixedOffsetZone.instance(regionalTime(hour.toMillis(), timezone.zone).utcOffset()));
+    : hour.setZone(FixedOffsetZone.instance(regionalOffsetMinutesEast(hour.toMillis(), timezone.zone)));
   const formattedHour = local.toLocaleString(timezone.mode === "fixed"
     ? { hour: "2-digit" } : { hour: "2-digit", minute: "2-digit" });
   const fixedWidthTime = formattedHour

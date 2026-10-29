@@ -32,6 +32,11 @@ export function requireTimezoneCoverage(milliseconds: number): void {
   }
 }
 
+export function regionalOffsetMinutesEast(milliseconds: number, zoneName: string): number {
+  requireTimezoneCoverage(milliseconds);
+  return -moment.tz.zone(zoneName)!.utcOffset(milliseconds);
+}
+
 export function regionalTime(milliseconds: number, zone: string) {
   requireTimezoneCoverage(milliseconds);
   // Explicit English locale keeps serializer date fields in ASCII, regardless
