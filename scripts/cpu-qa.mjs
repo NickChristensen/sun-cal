@@ -4,10 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const QA_URLS = {
-  baseline: 'https://sun-cal-cpu-qa-a-01a188c4.nickchristensen.workers.dev',
-  candidate: 'https://sun-cal-cpu-qa-b-01a188c4.nickchristensen.workers.dev',
-};
+const QA_URL = 'https://sun-cal-cpu-qa-pair-01a188c4.nickchristensen.workers.dev';
 const FIXED_NOW = '2026-10-16T12:00:00.000Z';
 const CALENDAR_CASES = [
   { name: 'fixed-minus-6', tz: '-6', latitude: 30.48, longitude: -97.65, height: 800 },
@@ -118,7 +115,7 @@ async function requestQa({ source, scenario, round, measured, benchRun, nextBenc
   const longitude = scenario.longitude ?? -97.65;
   const height = scenario.height ?? 800;
   const benchId = `${benchRun}-${String(nextBenchId.value++).padStart(4, '0')}`;
-  const url = new URL('/sun-cal.ics', QA_URLS[source]);
+  const url = new URL('/sun-cal.ics', QA_URL);
   url.searchParams.set('latitude', String(latitude));
   url.searchParams.set('longitude', String(longitude));
   url.searchParams.set('height', String(height));
@@ -127,7 +124,16 @@ async function requestQa({ source, scenario, round, measured, benchRun, nextBenc
   url.searchParams.set('__bench_state', cacheState);
   url.searchParams.set('bench_run', benchRun);
   url.searchParams.set('bench_id', benchId);
-  if (caseName === 'validation') url.search = `?__bench_case=validation&__bench_state=${encodeURIComponent(cacheState)}&bench_run=${encodeURIComponent(benchRun)}&bench_id=${encodeURIComponent(benchId)}`;
+  url.searchParams.set('bench_variant', source);
+  if (caseName === 'validation') {
+    url.search = new URLSearchParams({
+      __bench_case: 'validation',
+      __bench_state: cacheState,
+      bench_run: benchRun,
+      bench_id: benchId,
+      bench_variant: source,
+    }).toString();
+  }
 
   const controller = new AbortController();
   const startedAt = performance.now();
@@ -141,6 +147,7 @@ async function requestQa({ source, scenario, round, measured, benchRun, nextBenc
       headers: {
         'x-bench-case': caseType,
         'x-bench-cache-state': cacheState,
+        'x-bench-variant': source,
         'x-bench-tz': timezone,
         'x-bench-now': FIXED_NOW,
       },
@@ -376,10 +383,9 @@ export function summarizeCpuEvents(input, measurements) {
   };
 }
 
-export async function runQaBenchmark({ only, rounds = 5, runId = 'cpu-qa', cpuEventsPath } = {}) {
+export async function runQaBenchmark({ rounds = 5, runId = 'cpu-qa', cpuEventsPath } = {}) {
   assert.ok(Number.isInteger(rounds) && rounds >= 1, '--rounds must be a positive integer');
-  assert.ok(only === undefined || ['baseline', 'candidate'].includes(only), '--only must be baseline or candidate');
-  const sources = only ? [only] : ['baseline', 'candidate'];
+  const sources = ['baseline', 'candidate'];
   const plannedRequests = sources.length * (CALENDAR_CASES.length * CACHE_STATES.length * (rounds + 1) + ERROR_CASES.length * rounds);
   assert.ok(plannedRequests <= MAX_REQUESTS, `planned ${plannedRequests} requests; maximum is ${MAX_REQUESTS}`);
   const runLabel = String(runId).trim();
@@ -432,7 +438,7 @@ export async function runQaBenchmark({ only, rounds = 5, runId = 'cpu-qa', cpuEv
     rounds,
     warmupsPerCalendarScenario: 1,
     requests: requestCount.value,
-    sources: Object.fromEntries(sources.map(source => [source, QA_URLS[source]])),
+    sources: Object.fromEntries(sources.map(source => [source, QA_URL])),
     methodology: 'Sequential requests with alternating A/B order by measured round. HTTP wall time includes network and body transfer. It is not Cloudflare CPU time.',
     summary: { httpWallMs: groupedSummary(measurements, 'httpWallMs') },
     measurements,
@@ -451,7 +457,6 @@ export async function runQaBenchmark({ only, rounds = 5, runId = 'cpu-qa', cpuEv
 function readArgs(argv) {
   const options = {};
   const names = new Map([
-    ['--only', 'only'],
     ['--rounds', 'rounds'],
     ['--out', 'out'],
     ['--run-id', 'runId'],

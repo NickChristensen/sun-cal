@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { build } from 'esbuild';
@@ -9,7 +9,7 @@ import { Miniflare } from 'miniflare';
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(scriptDirectory, '..');
 const baselineRoot = resolve(projectRoot, '../baseline-src');
-const solarFixturePath = join(projectRoot, '.wrangler/cpu-solar-cache-locations-v1.json');
+const solarFixturePath = join(projectRoot, 'test/fixtures/cpu-solar-cache.json');
 const nowIso = '2026-10-16T12:00:00.000Z';
 const forecast = JSON.parse(await readFile(join(projectRoot, 'test/fixtures/uv-forecast.json'), 'utf8'));
 const config = await readFile(join(projectRoot, 'wrangler.toml'), 'utf8');
@@ -27,8 +27,10 @@ export const BENCHMARK_CASES = [
   { name: 'Australia/Lord_Howe', tz: 'Australia/Lord_Howe', latitude: -31.55, longitude: 159.08, height: 30 },
 ];
 
-const wrapperSource = `
-import worker from './src/index.ts';
+function wrapperSource(baselineEntry, candidateEntry) {
+  return `
+import baselineWorker from ${JSON.stringify(baselineEntry)};
+import candidateWorker from ${JSON.stringify(candidateEntry)};
 import { Settings } from 'luxon';
 Settings.defaultLocale = 'en-US';
 Settings.defaultZone = 'UTC';
@@ -65,28 +67,26 @@ const memoryCache = {
     stats.cacheMatch += 1;
     const key = cacheKey(input);
     const url = new URL(key);
-    if (activeCacheState !== 'fixture-export') {
-      if (url.pathname.startsWith('/solar/')) {
-        if (activeCacheState !== 'solar-hit' && activeCacheState !== 'stale-fallback') return undefined;
-        const fixture = PRECOMPUTED_SOLAR[url.searchParams.get('tz')];
-        if (!fixture) throw new Error('Missing embedded solar fixture for ' + url.searchParams.get('tz'));
-        return new Response(fixture.body, { headers: {
-          'Content-Type': 'text/calendar; charset=utf-8',
-          'Cache-Control': 'max-age=86400',
-          'X-Sun-Cal-Key': key,
-          'X-Sun-Cal-SHA256': fixture.sha256,
-        } });
-      }
-      if (url.pathname.startsWith('/uv/')) {
-        if (!['solar-hit', 'uv-hit', 'stale-fallback'].includes(activeCacheState)) return undefined;
-        const stale = activeCacheState === 'stale-fallback';
-        return new Response(JSON.stringify({
-          schema: 1,
-          localDate: '2026-10-16',
-          fetchedAt: new RealDate(clockMs - (stale ? 31 : 1) * 60_000).toISOString(),
-          forecast: FIXTURE,
-        }), { headers: { 'Cache-Control': 'max-age=86400' } });
-      }
+    if (url.pathname.startsWith('/solar/')) {
+      if (activeCacheState !== 'solar-hit' && activeCacheState !== 'stale-fallback') return undefined;
+      const fixture = PRECOMPUTED_SOLAR[url.searchParams.get('tz')];
+      if (!fixture) throw new Error('Missing embedded solar fixture for ' + url.searchParams.get('tz'));
+      return new Response(fixture.body, { headers: {
+        'Content-Type': 'text/calendar; charset=utf-8',
+        'Cache-Control': 'max-age=86400',
+        'X-Sun-Cal-Key': key,
+        'X-Sun-Cal-SHA256': fixture.sha256,
+      } });
+    }
+    if (url.pathname.startsWith('/uv/')) {
+      if (!['solar-hit', 'uv-hit', 'stale-fallback'].includes(activeCacheState)) return undefined;
+      const stale = activeCacheState === 'stale-fallback';
+      return new Response(JSON.stringify({
+        schema: 1,
+        localDate: '2026-10-16',
+        fetchedAt: new RealDate(clockMs - (stale ? 31 : 1) * 60_000).toISOString(),
+        forecast: FIXTURE,
+      }), { headers: { 'Cache-Control': 'max-age=86400' } });
     }
     return cacheEntries.get(key)?.clone();
   },
@@ -141,11 +141,11 @@ function endpointFor(request, caseName) {
   input.searchParams.set('longitude', String(location.longitude));
   input.searchParams.set('height', String(location.height));
   input.searchParams.set('tz', tz);
-  if (caseName === 'invalid-input') input.search = '?latitude=nope';
+  if (caseName === 'invalid-input') input.searchParams.set('latitude', 'nope');
   if (caseName === 'validation') input.search = '';
   return input;
 }
-async function invoke(input, env, ctx) {
+async function invoke(worker, input, env, ctx) {
   const background = [];
   const context = { waitUntil(promise) {
     const pending = Promise.resolve(promise);
@@ -167,7 +167,6 @@ export default {
     activeUpstreamMode = state === 'stale-fallback' ? 'success' : 'success';
     sentryEnvelopes.length = 0;
     stats = freshStats();
-    if (caseName === 'fixture-export') cacheEntries.clear();
     const input = endpointFor(request, caseName);
     if (state === 'stale-fallback') {
       activeUpstreamMode = 'failure';
@@ -177,16 +176,11 @@ export default {
     const bindings = caseName === 'sentry-error'
       ? { SENTRY_DSN: BENCH_ENV.SENTRY_DSN, SENTRY_RELEASE: BENCH_ENV.SENTRY_RELEASE }
       : BENCH_ENV;
-    const response = await invoke(new Request(input, { method: 'GET' }), bindings, ctx);
+    const variant = request.headers.get('x-bench-variant') || new URL(request.url).searchParams.get('bench_variant');
+    if (variant !== 'baseline' && variant !== 'candidate') throw new Error('x-bench-variant must be baseline or candidate');
+    const worker = variant === 'baseline' ? baselineWorker : candidateWorker;
+    const response = await invoke(worker, new Request(input, { method: 'GET' }), bindings, ctx);
     const body = await response.text();
-    if (caseName === 'fixture-export') {
-      const entry = [...cacheEntries.entries()].find(([key]) => new URL(key).pathname.startsWith('/solar/'));
-      if (!entry) throw new Error('Benchmark fixture request did not write a solar cache entry');
-      const [key, cached] = entry;
-      const fixtureBody = await cached.clone().text();
-      return new Response(JSON.stringify({ key, body: fixtureBody,
-        sha256: cached.headers.get('X-Sun-Cal-SHA256') }), { headers: { 'content-type': 'application/json' } });
-    }
     const wrapped = new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
     wrapped.headers.set('x-bench-counts', JSON.stringify(stats));
     wrapped.headers.set('x-bench-sentry-envelopes', String(sentryEnvelopes.length));
@@ -195,13 +189,18 @@ export default {
   },
 };
 `;
+}
 
-export async function buildBenchmarkBundle({ sourceDir, outfile, fixtureSourceDir = baselineRoot, minify = true } = {}) {
-  const root = resolve(sourceDir ?? projectRoot);
-  const solarFixtures = await loadOrGenerateSolarFixtures(resolve(fixtureSourceDir));
-  const contents = wrapperSource.replace('__BENCHMARK_SOLAR_FIXTURES__', JSON.stringify(solarFixtures));
+export async function buildBenchmarkBundle({ baselineDir = baselineRoot, candidateDir = projectRoot, outfile, minify = true } = {}) {
+  const baselineSource = resolve(baselineDir);
+  const candidateSource = resolve(candidateDir);
+  const solarFixtures = await loadSolarFixtures();
+  const contents = wrapperSource(
+    join(baselineSource, 'src/index.ts'),
+    join(candidateSource, 'src/index.ts'),
+  ).replace('__BENCHMARK_SOLAR_FIXTURES__', JSON.stringify(solarFixtures));
   const result = await build({
-    stdin: { contents, resolveDir: root, loader: 'ts', sourcefile: 'cpu-benchmark-wrapper.ts' },
+    stdin: { contents, resolveDir: projectRoot, loader: 'ts', sourcefile: 'cpu-benchmark-wrapper.ts' },
     bundle: true,
     format: 'esm',
     platform: 'node',
@@ -216,57 +215,47 @@ export async function buildBenchmarkBundle({ sourceDir, outfile, fixtureSourceDi
     const outputPath = resolve(outfile);
     await mkdir(dirname(outputPath), { recursive: true });
     await writeFile(outputPath, result.outputFiles[0].text);
-    return outputPath;
+    return {
+      outfile: outputPath,
+      bundleSha256: createHash('sha256').update(result.outputFiles[0].text).digest('hex'),
+      fixtureSha256: createHash('sha256').update(await readFile(solarFixturePath)).digest('hex'),
+      sourceHashes: {
+        baseline: await hashSourceTree(baselineSource),
+        candidate: await hashSourceTree(candidateSource),
+      },
+    };
   }
   return result.outputFiles[0].text;
 }
 
-async function loadOrGenerateSolarFixtures(sourceDir) {
-  try {
-    const fixtures = JSON.parse(await readFile(solarFixturePath, 'utf8'));
-    for (const testCase of BENCHMARK_CASES) {
-      const fixture = fixtures[testCase.tz];
-      assert.ok(fixture?.body && fixture?.sha256, `missing solar cache fixture for ${testCase.name}`);
-      assert.equal(createHash('sha256').update(fixture.body).digest('hex'), fixture.sha256);
-      assert.equal(parseEvents(fixture.body).length, 720);
-    }
-    return fixtures;
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
+async function loadSolarFixtures() {
+  const fixtures = JSON.parse(await readFile(solarFixturePath, 'utf8'));
+  for (const testCase of BENCHMARK_CASES) {
+    const fixture = fixtures[testCase.tz];
+    assert.ok(fixture?.body && fixture?.sha256, `missing frozen solar fixture for ${testCase.name}`);
+    assert.equal(createHash('sha256').update(fixture.body).digest('hex'), fixture.sha256);
+    assert.equal(parseEvents(fixture.body).length, 720);
   }
-  const fixtures = await generateSolarFixtures(sourceDir);
-  await mkdir(dirname(solarFixturePath), { recursive: true });
-  await writeFile(solarFixturePath, JSON.stringify(fixtures));
   return fixtures;
 }
 
-async function compileFixtureBundle(sourceDir) {
-  const result = await build({
-    stdin: { contents: wrapperSource.replace('__BENCHMARK_SOLAR_FIXTURES__', '{}'), resolveDir: sourceDir, loader: 'ts', sourcefile: 'cpu-benchmark-fixture-wrapper.ts' },
-    bundle: true, format: 'esm', platform: 'node', target: 'es2022',
-    nodePaths: [join(projectRoot, 'node_modules')], minify: true, sourcemap: false, write: false, logLevel: 'silent',
-  });
-  return result.outputFiles[0].text;
-}
-
-async function generateSolarFixtures(sourceDir) {
-  const runner = await createRunner(await compileFixtureBundle(sourceDir), 'fixture-builder');
-  const fixtures = {};
-  try {
-    for (const testCase of BENCHMARK_CASES) {
-      const response = await runner.mf.dispatchFetch('http://sun-cal.invalid/sun-cal.ics', {
-        headers: { 'x-bench-case': 'fixture-export', 'x-bench-cache-state': 'fixture-export', 'x-bench-tz': testCase.tz },
-      });
-      assert.equal(response.status, 200);
-      const fixture = await response.json();
-      assert.equal(parseEvents(fixture.body).length, 720, `expected 720 solar fixture events for ${testCase.name}`);
-      assert.equal(fixture.sha256, createHash('sha256').update(fixture.body).digest('hex'));
-      fixtures[testCase.tz] = { body: fixture.body, sha256: fixture.sha256 };
+async function hashSourceTree(root) {
+  const src = join(root, 'src');
+  const paths = [];
+  async function walk(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await walk(path);
+      else if (entry.isFile()) paths.push(path);
     }
-  } finally {
-    await runner.mf.dispose();
   }
-  return fixtures;
+  await walk(src);
+  paths.sort();
+  const hash = createHash('sha256');
+  for (const path of paths) {
+    hash.update(path.slice(src.length + 1)).update('\0').update(await readFile(path)).update('\0');
+  }
+  return hash.digest('hex');
 }
 
 function parseEvents(body) {
@@ -336,14 +325,15 @@ export async function createRunner(bundle, label) {
   return { mf, label, get outboundSentryRequests() { return outboundSentryRequests; } };
 }
 
-export async function requestCalendar(runner, testCase, state, caseName = 'calendar') {
+export async function requestCalendar(runner, testCase, state, caseName = 'calendar', variant = 'baseline', round = 0, measured = true) {
   const url = new URL('http://sun-cal.invalid/sun-cal.ics');
   url.searchParams.set('__bench_case', caseName);
   url.searchParams.set('__bench_state', state);
+  url.searchParams.set('bench_variant', variant);
   const started = performance.now();
   const sentryBefore = runner.outboundSentryRequests;
   const response = await runner.mf.dispatchFetch(url.href, {
-    headers: { 'x-bench-case': caseName, 'x-bench-cache-state': state, 'x-bench-tz': testCase?.tz ?? '-6' },
+    headers: { 'x-bench-case': caseName, 'x-bench-cache-state': state, 'x-bench-tz': testCase?.tz ?? '-6', 'x-bench-variant': variant },
   });
   const body = await response.text();
   const elapsedMs = performance.now() - started;
@@ -351,18 +341,26 @@ export async function requestCalendar(runner, testCase, state, caseName = 'calen
   const counts = JSON.parse(response.headers.get('x-bench-counts') || '{}');
   const sentryEnvelopes = Number(response.headers.get('x-bench-sentry-envelopes') || 0) +
     runner.outboundSentryRequests - sentryBefore;
-  counts.sentry += runner.outboundSentryRequests - sentryBefore;
+  assert.equal(runner.outboundSentryRequests - sentryBefore, 0, 'synthetic Sentry fetch must stay inside the wrapper');
   if (caseName === 'sentry-error') assert.equal(sentryEnvelopes, 1);
-  if (caseName === 'calendar') {
-    if (state === 'cold') assert.equal(counts.upstream, 1, 'cold case makes one synthetic OpenUV request');
-    if (state === 'solar-hit') assert.equal(counts.upstream, 0, `solar-hit uses the warm UV cache: ${JSON.stringify(counts)}`);
-    if (state === 'uv-hit') assert.equal(counts.upstream, 0, 'uv-hit uses the warm UV cache');
-    if (state === 'stale-fallback') assert.equal(counts.upstream, 2, 'stale fallback stays within the Worker retry bound');
-  }
+  const expectedCounts = caseName !== 'calendar' ? {
+    'not-found': { cacheMatch: 0, cachePut: 0, cacheDelete: 0, upstream: 0, sentry: 0 },
+    validation: { cacheMatch: 0, cachePut: 0, cacheDelete: 0, upstream: 0, sentry: 0 },
+    'invalid-input': { cacheMatch: 0, cachePut: 0, cacheDelete: 0, upstream: 0, sentry: 0 },
+    'sentry-error': { cacheMatch: 0, cachePut: 0, cacheDelete: 0, upstream: 0, sentry: 1 },
+  }[caseName] : {
+    cold: { cacheMatch: 2, cachePut: 2, cacheDelete: 0, upstream: 1, sentry: 0 },
+    'uv-hit': { cacheMatch: 2, cachePut: 1, cacheDelete: 0, upstream: 0, sentry: 0 },
+    'solar-hit': { cacheMatch: 2, cachePut: 0, cacheDelete: 0, upstream: 0, sentry: 0 },
+    'stale-fallback': { cacheMatch: 2, cachePut: 0, cacheDelete: 0, upstream: 2, sentry: 0 },
+  }[state];
+  for (const [name, value] of Object.entries(expectedCounts)) assert.equal(counts[name], value, `${caseName}/${state}/${variant} expected ${name}=${value}`);
   return {
-    source: runner.label,
+    variant,
     case: testCase?.name ?? caseName,
     cacheState: state,
+    round,
+    measured,
     status: response.status,
     elapsedMs,
     timing: 'local Miniflare request wall time; proxy for Worker CPU, not billed CPU time',
@@ -373,26 +371,22 @@ export async function requestCalendar(runner, testCase, state, caseName = 'calen
 }
 
 export async function runBenchmark({ baselineDir = baselineRoot, candidateDir = projectRoot, runs = 5, warmup = 1, states = ['cold', 'solar-hit', 'uv-hit', 'stale-fallback'], includeErrors = true } = {}) {
-  const [baselineBundle, candidateBundle] = await Promise.all([
-    buildBenchmarkBundle({ sourceDir: baselineDir }),
-    buildBenchmarkBundle({ sourceDir: candidateDir }),
-  ]);
-  const [baseline, candidate] = await Promise.all([
-    createRunner(baselineBundle, 'baseline'),
-    createRunner(candidateBundle, 'candidate'),
-  ]);
-  const runners = [baseline, candidate];
+  const bundle = await buildBenchmarkBundle({ baselineDir, candidateDir });
+  const runner = await createRunner(bundle, 'paired');
+  const variants = ['baseline', 'candidate'];
   const measurements = [];
   try {
     for (const testCase of BENCHMARK_CASES) {
-      for (const runner of runners) {
-        for (let index = 0; index < warmup; index += 1) await requestCalendar(runner, testCase, 'solar-hit');
+      for (const variant of variants) {
+        for (let index = 0; index < warmup; index += 1) {
+          measurements.push(await requestCalendar(runner, testCase, 'solar-hit', 'calendar', variant, 0, false));
+        }
       }
       for (const state of states) {
         for (let round = 0; round < runs; round += 1) {
-          const order = round % 2 === 0 ? runners : [...runners].reverse();
-          for (const runner of order) {
-            measurements.push(await requestCalendar(runner, testCase, state));
+          const order = round % 2 === 0 ? variants : [...variants].reverse();
+          for (const variant of order) {
+            measurements.push(await requestCalendar(runner, testCase, state, 'calendar', variant, round + 1));
           }
         }
       }
@@ -406,29 +400,29 @@ export async function runBenchmark({ baselineDir = baselineRoot, candidateDir = 
       ];
       for (const check of validationCases) {
         for (let round = 0; round < runs; round += 1) {
-          const order = round % 2 === 0 ? runners : [...runners].reverse();
-          for (const runner of order) measurements.push(await requestCalendar(runner, null, 'cold', check.name));
+          const order = round % 2 === 0 ? variants : [...variants].reverse();
+          for (const variant of order) measurements.push(await requestCalendar(runner, null, 'cold', check.name, variant, round + 1));
         }
       }
     }
   } finally {
-    await Promise.all(runners.map(({ mf }) => mf.dispose()));
+    await runner.mf.dispose();
   }
   const paired = new Map();
   for (const row of measurements.filter(item => item.digest)) {
     const key = `${row.case}/${row.cacheState}`;
     const values = paired.get(key) ?? {};
-    values[row.source] = row.digest;
+    values[row.variant] = row.digest;
     paired.set(key, values);
   }
-  for (const [key, values] of paired) assert.equal(values.baseline, values.candidate, `A/B calendar digest differs for ${key}`);
+  for (const [key, values] of paired) assert.equal(values.baseline, values.candidate, `paired calendar digest differs for ${key}`);
   return {
     createdAt: new Date().toISOString(),
     clock: nowIso,
     runs,
     warmup,
     sources: { baseline: resolve(baselineDir), candidate: resolve(candidateDir) },
-    methodology: 'Sequential alternating baseline/candidate requests. Times include local Miniflare dispatch and body transfer. They are a local wall-time proxy for Worker CPU and are not Cloudflare billed CPU measurements.',
+    methodology: 'Both handlers run in one Miniflare Worker. Requests select a variant by header and alternate order. Times include local Miniflare dispatch and body transfer. They are a local wall-time proxy for Worker CPU and are not Cloudflare billed CPU measurements.',
     digestPairs: Object.fromEntries(paired),
     measurements,
   };
@@ -442,11 +436,19 @@ function argValue(name, fallback) {
 async function main() {
   const [mode = 'run'] = process.argv.slice(2).filter(value => !value.startsWith('--'));
   if (mode === 'build') {
-    const sourceDir = argValue('--source', projectRoot);
-    const outfile = argValue('--out', join(projectRoot, '.wrangler/cpu-benchmark.js'));
-    await mkdir(dirname(resolve(outfile)), { recursive: true });
-    await buildBenchmarkBundle({ sourceDir, outfile });
-    process.stdout.write(JSON.stringify({ sourceDir: resolve(sourceDir), outfile: resolve(outfile) }) + '\n');
+    const baselineDir = resolve(argValue('--baseline', baselineRoot));
+    const candidateDir = resolve(argValue('--candidate', projectRoot));
+    const outfile = resolve(argValue('--out', join(projectRoot, '.wrangler/cpu-benchmark-paired.js')));
+    const result = await buildBenchmarkBundle({ baselineDir, candidateDir, outfile });
+    const manifestPath = `${outfile}.manifest.json`;
+    const manifest = {
+      schema: 1,
+      baselineDir,
+      candidateDir,
+      ...result,
+    };
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+    process.stdout.write(JSON.stringify({ ...manifest, manifestPath }) + '\n');
     return;
   }
   const options = {
