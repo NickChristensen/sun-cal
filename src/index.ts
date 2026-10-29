@@ -284,13 +284,15 @@ function buildSunEvents(
     description: string;
   }[];
 
+  const calendarDayMs = calendarDay.toMillis();
+  const solarNoonMs = (12 - longitude / 15) * 3_600_000;
   for (let offset = -180; offset < 180; offset += 1) {
-    const currentDay = calendarDay.plus({ days: offset });
+    const currentDayMs = calendarDayMs + offset * 86_400_000;
     // SunCalc selects the nearest solar cycle. Approximate local solar noon
     // selects this intended day even at +/-180 longitude; UTC noon alone can
     // select the adjacent day. UIDs continue to use the intended UTC date.
-    const solarAnchor = currentDay.plus({ hours: 12 - longitude / 15 }).toJSDate();
-    const currentDate = currentDay.toJSDate();
+    const solarAnchor = new Date(currentDayMs + solarNoonMs);
+    const currentDate = new Date(currentDayMs);
     const times = SunCalc.getTimes(solarAnchor, latitude, longitude, height);
 
     events.push(
