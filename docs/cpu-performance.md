@@ -1,10 +1,46 @@
 # CPU performance evidence
 
-Paused at Nick's request. The 10 ms target remains unmet. No new experiments or automatic resumption are authorized until an explicit resume.
+## Current fold-search result, November 1, 2026
 
-## Current result
+The binary fold-transition search did not produce a repeatable Worker CPU win. The fold-search experiment is rejected. The candidate remains outside the tracked application source. The recovered checkpoint is `181bf13`, and its accepted application code remains `5947624`.
 
-The same-endpoint A/B run is the current primary result. It passed all 336 response checks and joined CPU for all 304 measured requests. Across 64 paired cold and UV-hit requests, baseline median CPU was 49.5 ms and candidate median CPU was 41 ms. The paired candidate-to-baseline median ratio was 0.758, with a 95% bootstrap interval of 0.6875 to 0.8462. The candidate used less CPU in 53 pairs; the baseline used less CPU in 11 pairs.
+The saved local proof completed 396,125 transition probes across 344 zones and 37,432 serialized fold endpoints across 9,358 rollback transitions. The 43 existing tests, type check, and 40-request paired local smoke passed. Algorithm comparison counts fell from 33,845,044 to 2,573,172. Cloudflare Worker event CPU supplies the performance evidence.
+
+Each ratio is paired candidate CPU divided by baseline CPU, so values below 1 favor the candidate. The 95% intervals use 5,000 bootstrap samples of the median log ratio.
+
+| Cohort | Generation pairs | Baseline median CPU | Candidate median CPU | Candidate/baseline ratio | 95% interval | Coverage |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| First run, four locations | 64 | 28.5 ms | 26 ms | 0.9877296 | 0.942857 to 1.055556 | Complete |
+| Crossed run, four-location diagnostic | 59 | 34 ms | 34 ms | 1.0384615 | 0.945946 to 1.125000 | Incomplete and unbalanced |
+| Both runs, three named zones | 96 | 34 ms | 34 ms | 0.9735169 | 0.942857 to 1.049022 | Complete |
+
+The first run passed all 336 response checks and joined CPU for all 304 measured requests. The crossed run passed its response checks and joined CPU for 294 of 304 measured requests. Its four-location result is an incomplete and unbalanced diagnostic. The confidence intervals include 1 for all three cohorts.
+
+The complete named-zone cohort contains 384 measured CPU records and 192 matching response-digest pairs. Its warm solar-hit medians are 6 ms for both sources. All observed candidate generation CPU records exceed 10 ms.
+
+The crossed run reversed source assignment at the same QA endpoint. The saved normalized source labels identify the accepted source and fold-search candidate. The original driver labels remain in `driverSource`, and the raw crossed driver file remains at `../qa/fold-search-r2-crossed-raw.json`.
+
+The crossed run has ten missing measured CPU records and three missing warmup records. All ten measured gaps belong to fixed-offset generation or solar-hit requests. The first logging bucket reports `sampleInterval=1.6206896551724137`. A separate audit found 216 named-zone records, with 108 records per driver label and `sampleInterval=1`. This supports the complete three-zone cohort. The four-location crossed cohort remains incomplete. The CSV joins Worker events to measured driver rows by `benchId`; driver status, Ray ID, event count, counters, and digest stay populated when an event is missing.
+
+The named-zone result uses the accepted `5947624` source as baseline and the fold-search source as candidate. The October 29 original-versus-accepted series is a separate experiment. Keep its 49.5 ms to 41 ms result in the historical section below.
+
+Cloudflare Worker event CPU is the source for the CPU result. The CSV `wall_ms` column stores Worker event `wallMs`. Driver `httpWallMs` includes network time and response transfer. Driver wall time is excluded from the CPU analysis.
+
+The [resumed QA resource budget](cpu-resource-budget.md) records the 672 requests, two uploads, query totals, scan metadata, and cost cap. The production Worker remains at version `6c22597d-ae1a-4863-9ac6-52c87039998b`.
+
+## Local format and endpoint probes, November 1
+
+Two timestamp-format candidates failed local semantic checks. Both remain off branch. Neither has remote Worker CPU data, and no remote traffic ran for these probes.
+
+The first used `fromMillis(date.valueOf() + offset * 3600000, { zone: "UTC" })`. At accepted timezone input `1e308`, the existing Luxon path returns its current-time fallback after overflow, while the proposed expression gives `Invalid DateTime`. The saved fixed-format probe records 2,304 differences across 5,472 comparisons.
+
+The second used `DateTime.fromJSDate(date, { zone: "UTC" })` and preserved plus signs. The one-line UTC candidate passed the 43 existing tests. Its fixed-zone probe records 116 differences across 5,472 formatter comparisons. An 81-comparison endpoint probe found six digest changes for inputs accepted by current numeric validation. The accepted extreme longitudes were `36007408080` and `-35992462320`. The affected default zones were `America/Los_Angeles` and `Pacific/Kiritimati`, with display timezone `0` or `-6`. Both response variants returned HTTP 200. One baseline `Invalid DateTime` description changed to a formatted time. The current Worker has no latitude or longitude range bounds.
+
+The saved probes are `work/recovery.nosync/qa/fixed-format-probes.json`, `work/recovery.nosync/qa/fixed-zone-probes.json`, and `work/recovery.nosync/qa/endpoint-bounds-probe.json`. No guard or API validation change was made. Both source patches remain outside the branch. The raw fixture collector is local and under review. The next saved UV timestamp candidate is unmeasured and local only. The UTC-construction preflight remains unused and will be amended for UV work after local proof.
+
+## Historical result: October 29 same-endpoint A/B and A/A
+
+The same-endpoint A/B run was the primary result for the October 29 original-versus-accepted comparison. It passed all 336 response checks and joined CPU for all 304 measured requests. Across 64 paired cold and UV-hit requests, baseline median CPU was 49.5 ms and candidate median CPU was 41 ms. The paired candidate-to-baseline median ratio was 0.758, with a 95% bootstrap interval of 0.6875 to 0.8462. The candidate used less CPU in 53 pairs; the baseline used less CPU in 11 pairs.
 
 Every candidate cold and UV-hit sample was above 10 ms. The 10 ms ordinary-request target remains unmet. Warm solar-hit medians were 7 ms for both variants. Their paired ratio was 1.108, with a 95% interval of 1.000 to 1.200. This result shows no warm-path improvement.
 
@@ -22,7 +58,7 @@ The same-endpoint A/B comparison uses cold and UV-hit states across four locatio
 
 Both same-endpoint runs sent source labels to one QA endpoint. The `x-bench-variant` header and `bench_variant` query value select the source copy for each request. The A/A source trees had the same hash, `2800ec622d4dd0f078e1259e8410a471ff525e6b149671926852dc153bfd4a90`. The A/A control found no measurable difference between identical source copies. The same-endpoint design removes the fixed Worker-name assignment confound seen in earlier runs. It does not guarantee hardware independence.
 
-The earlier dual-worker combined run assigned each variant to a different QA Worker name and alternated request order. It reported 47 ms baseline and 86 ms candidate medians. Its warm solar-hit controls moved from 6 ms to 12 ms across 31 pairs, and stale-fallback controls moved from 7 ms to 12 ms across 31 pairs. Keep that result as history. The current same-endpoint A/B run is the primary comparison.
+The earlier dual-worker combined run assigned each variant to a different QA Worker name and alternated request order. It reported 47 ms baseline and 86 ms candidate medians. Its warm solar-hit controls moved from 6 ms to 12 ms across 31 pairs, and stale-fallback controls moved from 7 ms to 12 ms across 31 pairs. Keep that result as history. Within the October 29 series, the same-endpoint A/B run was the primary comparison.
 
 The A/A and A/B comparison plan has 672 requests. One request immediately after publication returned 404 and stopped its driver run. A readiness request then returned a valid calendar. Those two requests sit outside the comparison plan, which sets the phase bound at 674 requests. The [CPU resource budget](cpu-resource-budget.md) records the request loop bounds, storage audit, and log collection limits.
 
@@ -157,7 +193,7 @@ The primary interval uses 5,000 bootstrap samples of the median log candidate-to
 
 The direct-offset helper passed 396,125 timestamp-and-zone probes across all 344 canonical zones in the bundled data. Each probe compared the direct pinned-table UTC offset with Moment's existing converted value. The probes covered monthly dates, offset transitions at one millisecond before, exactly at, and one millisecond after the transition, and coverage edges. The coverage end still rejects. These checks show equivalence to the current pinned Moment behavior. The IANA database itself remains outside this equivalence check.
 
-The [CSV](cpu-measurements.csv) contains 2,622 measured request rows from nine runs. Warmup rows are excluded. Three measured control rows keep their status, Ray ID, event count, counters, and digest. Their CPU, wall-time, and script-version fields are blank because their Worker events are missing: one baseline fixed-offset cold row in `iteration-3` and the two candidate controls listed above. The A/A rows use the `paired-aa-control` experiment label and keep their `baseline` and `candidate` source labels. The `cpu_ms` and `wall_ms` columns use Cloudflare Worker event metrics. The CSV also records response status, Ray ID, event count, cache and Sentry counters, and normalized body digest. It contains no request URLs, request headers, or IP data.
+The [CSV](cpu-measurements.csv) contains 3,230 measured request rows from eleven runs. Warmup rows are excluded. Thirteen measured rows keep their response status, Ray ID, event count, counters, and digest while CPU, Worker wall time, and script version stay blank. Three gaps are historical control events. Ten gaps are fixed-offset measured rows from the crossed fold-search run. That run also has three missing warmup events; warmups are outside the CSV. The A/A rows use the `paired-aa-control` experiment label and keep their `baseline` and `candidate` source labels. New `fold-search-r2-crossed` rows use source labels normalized from the reversed bundle assignment. The `cpu_ms` and `wall_ms` columns use Cloudflare Worker event metrics. The CSV also records response status, Ray ID, event count, cache and Sentry counters, and normalized body digest. It contains no request URLs, request headers, or IP data.
 
 ## Production context and validation
 
@@ -233,7 +269,7 @@ run.cpu = summarizeCpuEvents(events, run.measurements);
 await writeFile(outPath, JSON.stringify(run, null, 2) + '\n');
 ```
 
-The helper requires one Worker event for each measured request. It reports missing CPU values separately and rejects duplicate benchmark IDs. A request with no Worker event remains a coverage gap. The CSV preserves the three known control gaps with blank CPU, wall-time, and script-version values. Local Miniflare reports local request wall time and checks response digests and operation counts. Cloudflare CPU values come from persisted Worker events. This procedure ends with QA data collection.
+The helper requires one Worker event for each measured request. It reports missing CPU values separately and rejects duplicate benchmark IDs. A request with no Worker event remains a coverage gap. The CSV keeps all thirteen measured gaps with blank CPU, Worker wall-time, and script-version values. The three missing warmup events from the crossed run stay outside the measured-row CSV. Local Miniflare reports local request wall time and checks response digests and operation counts. Cloudflare CPU values come from persisted Worker events. This procedure ends with QA data collection.
 
 
 ## Same-endpoint A/B distributions

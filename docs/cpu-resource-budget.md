@@ -1,8 +1,36 @@
 # QA resource budget
 
-This budget applies to the synthetic CPU experiments. The ordinary production Worker is unchanged. Its production bindings are never attached to a QA Worker.
+This budget applies to the synthetic CPU experiments. The production Worker remains unchanged. Its production bindings are never attached to a QA Worker.
 
-## Completed phase
+## Resumed fold-search phase, November 1, 2026
+
+Two same-endpoint runs used 672 HTTP requests and two QA code uploads. The preflight cap was 674 requests, so two requests remain unused. Each run sent 336 requests and passed its response checks. QA Workers used the configured 500 ms CPU cap, empty bindings, and empty schedules. The uploaded versions were `299dc967-bd50-46e9-9a7f-93ff12330ed1` and `02d06f98-2ce6-45b2-a43d-aa608abbd3c4`.
+
+| Operation | Per run | Two-run phase |
+| --- | ---: | ---: |
+| Synthetic cache matches | 576 | 1,152 |
+| Synthetic cache puts | 216 | 432 |
+| Mocked OpenUV calls | 216 | 432 |
+| Mocked Sentry sends | 16 | 32 |
+| Actual D1 reads or writes | 0 | 0 |
+| Actual R2 operations | 0 | 0 |
+| Actual Durable Object storage operations | 0 | 0 |
+| Actual native Cache API operations | 0 | 0 |
+| Actual OpenUV calls | 0 | 0 |
+| Actual Sentry calls | 0 | 0 |
+
+The saved Worker events contain 5,560 ms CPU in the first run and 6,201 ms in the crossed run. These sums include returned warmup events. Thirteen event records are missing across the two runs: ten measured requests and three warmups. The configured cap reserves 6,500 ms for those gaps. The observed CPU sum plus that reserve is 18,261 ms.
+
+The 22 log queries used so far count toward the 80-query preflight limit. The named-zone sampling audit scanned 2,202,948 log rows and 154,697,888 bytes. The scoped diagnostic scanned 1,172,035 log rows and 97,781,139 bytes. The earlier 20 compact query responses did not retain scan statistics, so cumulative scanned rows and bytes are unknown. These are Workers Observability scans, not D1 reads. No further broad query ran. A denser collector is in development and did not run in this phase.
+
+The November 1 cumulative ceiling remains $0.02. The executed phase uses the conservative 16-log-events-per-request allowance in the saved [UTC-construction preflight](../../../../outputs/sun-cal-utc-construction-preflight.md). Its Standard overage-equivalent bound is $0.00701802: $0.0002016 for requests, $0.00036522 for CPU, and $0.0064512 for generated logs. The bound assumes no included allowance and does not give the account's billed amount.
+
+The [Workers Logs pricing page](https://developers.cloudflare.com/workers/observability/logs/workers-logs/#pricing) applies its event-write meter through November 30, 2026, with a published Paid overage of $0.60 per million written events and seven-day retention. [Observability datasets pricing](https://developers.cloudflare.com/observability/logs/datasets/#pricing) and [Observability pricing](https://developers.cloudflare.com/observability/pricing/) list queries, dashboards, alerts, and analytics without an additional charge. The December 1 ingestion and storage change is outside the November 1 estimate. Log query scans do not create new ingested bytes. The pending UTC-construction phase in the linked preflight did not run; its request, CPU, and log reservations are excluded from this ledger. The account invoice was not queried.
+
+New November 1 traffic totals 672 requests and two uploads. Cumulative project totals are 3,804 requests and 20 uploads. The production Worker remains at version `6c22597d-ae1a-4863-9ac6-52c87039998b`. The prior one-worker phase and pause checkpoint are retained below as history.
+
+## Historical synthetic phase before November 1
+
 
 The first phase sent 2,458 controlled HTTP requests: two smoke requests, one 107-request exploratory run that stopped on a harness assertion, one 111-request baseline, one 222-request comparison, and six 336-request comparisons or crossovers. Local Miniflare requests are separate and make no remote calls.
 
@@ -10,9 +38,9 @@ All application data operations in that phase were synthetic. Actual D1 row read
 
 The completed phase created 16 isolated QA code versions. Those uploads and deployment metadata writes are real account operations, separate from application data storage. Managed invocation logging also creates telemetry records. The experiment did not create a D1 database, R2 bucket, Durable Object namespace, queue, or cron trigger.
 
-## One-Worker control phase
+## Historical one-worker control phase, October 29
 
-The next phase has two runs. An A/A run imports two byte-identical copies of the original source. An A/B run imports the original and the current candidate. Both labels use the same QA Worker endpoint. Each run uses four locations, four cache states, two variants, one warmup per variant and case, eight measured rounds, and three error cases.
+The October 29 phase had two runs. An A/A run imports two byte-identical copies of the original source. An A/B run imports the original and the then-current candidate. Both labels use the same QA Worker endpoint. Each run uses four locations, four cache states, two variants, one warmup per variant and case, eight measured rounds, and three error cases.
 
 `4 × 4 × 2 × (1 + 8) + 3 × 2 × 8 = 336 HTTP requests per run`.
 
@@ -47,6 +75,6 @@ The mutable in-memory cache retains at most the small forecast envelope and one 
 
 CPU-log queries use the recorded run ID, bounded time windows, pages of at most 50 events, and a finite page limit. Missing records remain explicit evidence gaps. A missing metric never counts as a fast request.
 
-## Pause checkpoint
+## Historical pause checkpoint, October 29
 
-At the pause, the completed phases total 3,132 controlled HTTP requests and 18 QA code uploads. This includes exploratory runs, both publication/readiness requests, warmups, and the same-endpoint A/A and A/B comparisons. The completed control phase used its full 674-request bound. Actual application D1, R2, Durable Object storage, native Cache API, OpenUV, and Sentry operations remain zero. All three QA Workers are preserved. No QA resource cleanup was executed. No new benchmark traffic is authorized until an explicit resume.
+At the pause, the completed phases total 3,132 controlled HTTP requests and 18 QA code uploads. This includes exploratory runs, both publication/readiness requests, warmups, and the same-endpoint A/A and A/B comparisons. The completed control phase used its full 674-request bound. Actual application D1, R2, Durable Object storage, native Cache API, OpenUV, and Sentry operations remain zero. All three QA Workers are preserved. No QA resource cleanup was executed. No new benchmark traffic had been authorized at that checkpoint. The November 1 resumed phase is recorded above.
