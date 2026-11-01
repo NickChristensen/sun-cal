@@ -26,7 +26,35 @@ The named-zone result uses the accepted `5947624` source as baseline and the fol
 
 Cloudflare Worker event CPU is the source for the CPU result. The CSV `wall_ms` column stores Worker event `wallMs`. Driver `httpWallMs` includes network time and response transfer. Driver wall time is excluded from the CPU analysis.
 
-The [resumed QA resource budget](cpu-resource-budget.md) records the 672 requests, two uploads, query totals, scan metadata, and cost cap. The production Worker remains at version `6c22597d-ae1a-4863-9ac6-52c87039998b`.
+The [resumed QA resource budget](cpu-resource-budget.md) records the November 1 request and upload totals, query scans, missing-event reserve, and cost cap. The production Worker remains at version `6c22597d-ae1a-4863-9ac6-52c87039998b`.
+
+## UV timestamp result, November 1, 2026
+
+The UV timestamp candidate was rejected and remains outside the tracked application source. It precomputed validated UV timestamps and used those millisecond values during event construction. The accepted application code remains `5947624`. The candidate source hash was `38962f71de2f5f3e8ec6c41ef2a160c404fdaffea0e9599011c5c5c1e60b6362`.
+
+The predeclared primary cohort tested warm solar-hit requests with 32 pairs. Baseline and candidate median Worker CPU were both 9 ms. The paired candidate-to-baseline ratio was 0.95346, with a 95% bootstrap interval of 0.80000 to 1.16667. The interval includes 1. Only one unswapped batch ran, so it did not establish a CPU win.
+
+The 64-pair generation cohort is secondary context. Baseline median Worker CPU was 51.5 ms and candidate median was 53 ms. The paired ratio was 1.04313, with a 95% interval of 0.95290 to 1.09375. This interval includes 1. All 64 candidate generation samples exceeded 10 ms, so the 10 ms target remains unmet.
+
+Each ratio is paired candidate CPU divided by baseline CPU. The intervals use 5,000 bootstrap samples of the median log ratio.
+
+| State or error case | n per source | Baseline median / p95 / max CPU | Baseline >10 ms | Candidate median / p95 / max CPU | Candidate >10 ms |
+| --- | ---: | --- | ---: | --- | ---: |
+| Cold | 32 | 63.5 / 121.05 / 145 ms | 32 | 63 / 103.8 / 125 ms | 32 |
+| UV-hit | 32 | 45.5 / 71.8 / 80 ms | 32 | 46.5 / 78.35 / 82 ms | 32 |
+| Solar-hit | 32 | 9 / 14.45 / 15 ms | 9 | 9 / 18.05 / 33 ms | 6 |
+| Stale fallback | 32 | 10 / 22.05 / 29 ms | 15 | 10 / 15.45 / 27 ms | 11 |
+| Not found, HTTP 404 | 8 | 1.5 / 2 / 2 ms | 0 | 1.5 / 2 / 2 ms | 0 |
+| Validation, HTTP 400 | 8 | 1.5 / 3.95 / 5 ms | 0 | 1 / 2 / 2 ms | 0 |
+| Sentry error, HTTP 500 | 8 | 3 / 7.9 / 10 ms | 0 | 2 / 4.65 / 5 ms | 0 |
+
+The table uses Cloudflare event CPU. Each source has 32 records per calendar state and eight records per error case. The p95 values use linear interpolation. The CSV stores Worker event `wallMs` in `wall_ms`. Driver `httpWallMs` includes network and response time and is not Worker CPU.
+
+The run sent 336 requests, including 32 warmups. All 336 event records matched QA version `3cc07232-bdda-45d5-801c-74f53892a3da`. The 304 measured requests matched CPU records and passed their status checks. All 144 calendar digest pairs passed, including warmups. The 128 measured calendar digest pairs passed. The saved candidate test log records 43 of 43 tests passing. A later repeat stopped while `test/worker.test.mjs` remained pending, so it adds no test result.
+
+The uploaded QA run produced 10,196 ms of observed event CPU, including warmups. The dense telemetry query scanned 2,153,143 log rows and 594,312,158 bytes. This exceeded the predeclared 512 MiB per-query stop of 536,870,912 bytes. No more QA requests, uploads, or telemetry queries ran.
+
+The [QA resource ledger](cpu-resource-budget.md) records the cumulative CPU reserve, known scan totals, query count, and cost bound. The [resumed measurements CSV](cpu-measurements.csv) adds 304 measured rows and retains all earlier rows and blanks. The October 29 49.5 ms to 41 ms result remains a separate historical comparison.
 
 ## Local format and endpoint probes, November 1
 
@@ -36,7 +64,7 @@ The first used `fromMillis(date.valueOf() + offset * 3600000, { zone: "UTC" })`.
 
 The second used `DateTime.fromJSDate(date, { zone: "UTC" })` and preserved plus signs. The one-line UTC candidate passed the 43 existing tests. Its fixed-zone probe records 116 differences across 5,472 formatter comparisons. An 81-comparison endpoint probe found six digest changes for inputs accepted by current numeric validation. The accepted extreme longitudes were `36007408080` and `-35992462320`. The affected default zones were `America/Los_Angeles` and `Pacific/Kiritimati`, with display timezone `0` or `-6`. Both response variants returned HTTP 200. One baseline `Invalid DateTime` description changed to a formatted time. The current Worker has no latitude or longitude range bounds.
 
-The saved probes are `work/recovery.nosync/qa/fixed-format-probes.json`, `work/recovery.nosync/qa/fixed-zone-probes.json`, and `work/recovery.nosync/qa/endpoint-bounds-probe.json`. No guard or API validation change was made. Both source patches remain outside the branch. The raw fixture collector is local and under review. The next saved UV timestamp candidate is unmeasured and local only. The UTC-construction preflight remains unused and will be amended for UV work after local proof.
+The saved probes are `work/recovery.nosync/qa/fixed-format-probes.json`, `work/recovery.nosync/qa/fixed-zone-probes.json`, and `work/recovery.nosync/qa/endpoint-bounds-probe.json`. No guard or API validation change was made. Both source patches remain outside the branch. The raw fixture collector is local and under review. The UV timestamp candidate was measured and rejected. The pending UTC-construction phase in its preflight did not run, and its limits are excluded from the UV ledger.
 
 ## Historical result: October 29 same-endpoint A/B and A/A
 
@@ -193,7 +221,7 @@ The primary interval uses 5,000 bootstrap samples of the median log candidate-to
 
 The direct-offset helper passed 396,125 timestamp-and-zone probes across all 344 canonical zones in the bundled data. Each probe compared the direct pinned-table UTC offset with Moment's existing converted value. The probes covered monthly dates, offset transitions at one millisecond before, exactly at, and one millisecond after the transition, and coverage edges. The coverage end still rejects. These checks show equivalence to the current pinned Moment behavior. The IANA database itself remains outside this equivalence check.
 
-The [CSV](cpu-measurements.csv) contains 3,230 measured request rows from eleven runs. Warmup rows are excluded. Thirteen measured rows keep their response status, Ray ID, event count, counters, and digest while CPU, Worker wall time, and script version stay blank. Three gaps are historical control events. Ten gaps are fixed-offset measured rows from the crossed fold-search run. That run also has three missing warmup events; warmups are outside the CSV. The A/A rows use the `paired-aa-control` experiment label and keep their `baseline` and `candidate` source labels. New `fold-search-r2-crossed` rows use source labels normalized from the reversed bundle assignment. The `cpu_ms` and `wall_ms` columns use Cloudflare Worker event metrics. The CSV also records response status, Ray ID, event count, cache and Sentry counters, and normalized body digest. It contains no request URLs, request headers, or IP data.
+The [CSV](cpu-measurements.csv) contains 3,534 measured request rows from twelve runs. Warmup rows are excluded. Thirteen measured rows keep their response status, Ray ID, event count, counters, and digest while CPU, Worker wall time, and script version stay blank. Three gaps are historical control events. Ten gaps are fixed-offset measured rows from the crossed fold-search run. That run also has three missing warmup events; warmups are outside the CSV. The A/A rows use the `paired-aa-control` experiment label and keep their `baseline` and `candidate` source labels. New `fold-search-r2-crossed` rows use source labels normalized from the reversed bundle assignment. The `uv-timestamp-r1` rows join measured events by `benchId`. The `cpu_ms` and `wall_ms` columns use Cloudflare Worker event metrics. The CSV also records response status, Ray ID, event count, cache and Sentry counters, and normalized body digest. It contains no request URLs, request headers, or IP data.
 
 ## Production context and validation
 

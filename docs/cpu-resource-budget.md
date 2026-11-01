@@ -27,10 +27,36 @@ The November 1 cumulative ceiling remains $0.02. The executed phase uses the con
 
 The [Workers Logs pricing page](https://developers.cloudflare.com/workers/observability/logs/workers-logs/#pricing) applies its event-write meter through November 30, 2026, with a published Paid overage of $0.60 per million written events and seven-day retention. [Observability datasets pricing](https://developers.cloudflare.com/observability/logs/datasets/#pricing) and [Observability pricing](https://developers.cloudflare.com/observability/pricing/) list queries, dashboards, alerts, and analytics without an additional charge. The December 1 ingestion and storage change is outside the November 1 estimate. Log query scans do not create new ingested bytes. The pending UTC-construction phase in the linked preflight did not run; its request, CPU, and log reservations are excluded from this ledger. The account invoice was not queried.
 
-New November 1 traffic totals 672 requests and two uploads. Cumulative project totals are 3,804 requests and 20 uploads. The production Worker remains at version `6c22597d-ae1a-4863-9ac6-52c87039998b`. The prior one-worker phase and pause checkpoint are retained below as history.
+## UV timestamp phase, November 1, 2026
+
+The UV timestamp trial used 336 HTTP requests, one QA code upload, and one dense Workers Observability query. November 1 now has 23 telemetry queries. It left 336 requests, one upload, and one query unused from the phase allowance. Each request used synthetic fixtures and a QA Worker with a 500 ms CPU cap, empty bindings, and empty schedules. The uploaded QA version was 3cc07232-bdda-45d5-801c-74f53892a3da.
+
+| Operation | Trial total |
+| --- | ---: |
+| Synthetic cache matches | 576 |
+| Synthetic cache puts | 216 |
+| Mocked OpenUV calls | 216 |
+| Mocked Sentry sends | 16 |
+| Actual D1 reads or writes | 0 |
+| Actual R2 operations | 0 |
+| Actual Durable Object storage operations | 0 |
+| Actual native Cache API operations | 0 |
+| Actual OpenUV calls | 0 |
+| Actual Sentry calls | 0 |
+
+The 336 event records contain 10,196 ms of observed Worker CPU, including warmups. They match the uploaded QA version. The run sent 336 HTTP requests. No application data operations reached external services.
+
+The dense query scanned 2,153,143 log rows and 594,312,158 bytes. This exceeded the predeclared 512 MiB query stop of 536,870,912 bytes. No further requests, uploads, or telemetry queries ran. The remaining allowance stays unused.
+
+The two prior queries with retained scan statistics recorded 3,374,983 scanned rows and 252,479,027 bytes. Known scan totals are now 5,528,126 rows and 846,791,185 bytes. The earlier 20 compact queries did not retain scan statistics, so the full cumulative scan remains unknown. These counts describe Workers Observability scans, not D1 reads.
+
+The prior CPU account was 11,761 observed ms plus 6,500 ms reserved for 13 missing records, for an 18,261 ms bound. The UV trial adds 10,196 observed ms. The cumulative account is 21,957 observed ms across 995 event records, plus the unchanged 6,500 ms reserve for 13 gaps, for a 28,457 ms bound.
+
+The previous conservative cost bound was $0.00701802. The UV trial adds $0.00191752: $0.00010080 for requests, $0.00020392 for CPU, and $0.00161280 for the eight-log-events-per-request allowance. The November 1 cumulative bound is $0.00893554 under the $0.02 ceiling. This estimate uses the [Workers Logs pricing page](https://developers.cloudflare.com/workers/observability/logs/workers-logs/#pricing) event-write price through November 30 and the listed Paid rate of $0.60 per million events. The [Observability datasets pricing](https://developers.cloudflare.com/observability/logs/datasets/#pricing) and [Observability pricing](https://developers.cloudflare.com/observability/pricing/) pages list query and analytics features without an additional charge. The December 1 ingestion and storage change is outside this estimate. The account invoice was not queried.
+
+New November 1 traffic totals 1,008 requests and three uploads. Cumulative project totals are 4,140 requests and 21 uploads. The production Worker remains at version `6c22597d-ae1a-4863-9ac6-52c87039998b`. The prior one-worker phase and pause checkpoint are retained below as history.
 
 ## Historical synthetic phase before November 1
-
 
 The first phase sent 2,458 controlled HTTP requests: two smoke requests, one 107-request exploratory run that stopped on a harness assertion, one 111-request baseline, one 222-request comparison, and six 336-request comparisons or crossovers. Local Miniflare requests are separate and make no remote calls.
 
