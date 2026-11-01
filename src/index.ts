@@ -2,8 +2,8 @@ import ical, { foldLines } from "ical-generator";
 import { DateTime, FixedOffsetZone } from "luxon";
 import SunCalc from "suncalc";
 import { captureWorkerError, isSentryDsn, withSentry, type SentryEnv } from "./sentry";
-import { canonicalTimezone, namedEventDates, regionalTime, requireTimezoneCoverage,
-  timezoneComponent, TIMEZONE_ASSET_VERSION, TIMEZONE_DATA_VERSION } from "./timezones";
+import { canonicalTimezone, namedEventDates, regionalOffsetMinutesEast,
+  requireTimezoneCoverage, timezoneComponent, TIMEZONE_ASSET_VERSION, TIMEZONE_DATA_VERSION } from "./timezones";
 import { getUvForecast, localDayHttpMaxAge, localUvDay, type DisplayTimezone,
   type UvForecastItem } from "./uv";
 
@@ -284,13 +284,19 @@ function buildSunEvents(
     description: string;
   }[];
 
+  const calendarDayMs = calendarDay.toMillis();
+  const solarNoonMs = (12 - longitude / 15) * 3_600_000;
   for (let offset = -180; offset < 180; offset += 1) {
-    const currentDay = calendarDay.plus({ days: offset });
+    const currentDayMs = calendarDayMs + offset * 86_400_000;
     // SunCalc selects the nearest solar cycle. Approximate local solar noon
     // selects this intended day even at +/-180 longitude; UTC noon alone can
     // select the adjacent day. UIDs continue to use the intended UTC date.
-    const solarAnchor = currentDay.plus({ hours: 12 - longitude / 15 }).toJSDate();
-    const currentDate = currentDay.toJSDate();
+    let solarAnchor = new Date(currentDayMs + solarNoonMs);
+    if (Number.isNaN(solarAnchor.valueOf())) {
+      solarAnchor = calendarDay.plus({ days: offset })
+        .plus({ hours: 12 - longitude / 15 }).toJSDate();
+    }
+    const currentDate = new Date(currentDayMs);
     const times = SunCalc.getTimes(solarAnchor, latitude, longitude, height);
 
     events.push(
@@ -319,8 +325,7 @@ function formatSunTime(date: Date, timezone: DisplayTimezone): string {
   if (timezone.mode === "fixed") {
     return utc.plus({ hours: timezone.offset }).toLocaleString(DateTime.TIME_SIMPLE);
   }
-  const pinned = regionalTime(date.valueOf(), timezone.zone);
-  const local = utc.setZone(FixedOffsetZone.instance(pinned.utcOffset()));
+  const local = utc.setZone(FixedOffsetZone.instance(regionalOffsetMinutesEast(date.valueOf(), timezone.zone)));
   return local.toLocaleString(DateTime.TIME_SIMPLE);
 }
 
@@ -366,7 +371,7 @@ function createEventId(type: string, date: Date) {
 function createBarChartLine({ hour, uv }: UvHour, minUv: number, timezone: DisplayTimezone) {
   const local = timezone.mode === "fixed"
     ? hour.plus({ hours: timezone.offset })
-    : hour.setZone(FixedOffsetZone.instance(regionalTime(hour.toMillis(), timezone.zone).utcOffset()));
+    : hour.setZone(FixedOffsetZone.instance(regionalOffsetMinutesEast(hour.toMillis(), timezone.zone)));
   const formattedHour = local.toLocaleString(timezone.mode === "fixed"
     ? { hour: "2-digit" } : { hour: "2-digit", minute: "2-digit" });
   const fixedWidthTime = formattedHour
