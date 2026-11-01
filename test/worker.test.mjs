@@ -721,6 +721,15 @@ test('solar events are stable for a UTC day across longitudes, including both da
   }
 });
 
+test('accepted finite longitude overflow preserves the existing solar calendar', async () => {
+  for (const longitude of ['1e300', '-1e300', '1.7976931348623157e308']) {
+    const events = await solarEvents(locationEndpoint(30.48, longitude, -6));
+    assert.equal(events.length, 720);
+    assert.equal(createHash('sha256').update(JSON.stringify(events)).digest('hex'),
+      'd948c2002baf3066c90ff6943b8e6f2e36b4a9d6a0c1b799058e7f3a8ea268e2');
+  }
+});
+
 test('UTC midnight shifts the exact 360-day window while overlapping events stay identical', async () => {
   for (const longitude of [-180, -97.65, 180]) {
     const url = locationEndpoint(30.48, longitude);

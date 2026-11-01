@@ -1,5 +1,11 @@
 # CPU performance evidence
 
+## Interrogate correction, November 1, 2026
+
+The read-only review found one P2 issue. The baseline accepts finite longitudes such as `1e300`, `-1e300`, `1e308`, `-1e308`, and the maximum finite number. It returns HTTP 200 with 720 solar events. The reviewed head could return HTTP 502 when direct solar-anchor arithmetic produced an invalid date. The follow-up fix keeps the fast arithmetic for valid dates and uses the original Luxon calendar-day calculation when the fast result is invalid. This restores accepted API behavior.
+
+The CPU measurements in this file predate this fix. The accepted source used in the historical CPU comparisons is `5947624`. CPU on the fixed source has not been measured on Cloudflare Workers. No CPU gain is claimed for the fix. Final review and checks are required before release.
+
 ## Current fold-search result, November 1, 2026
 
 The binary fold-transition search did not produce a repeatable Worker CPU win. The fold-search experiment is rejected. The candidate remains outside the tracked application source. The recovered checkpoint is `181bf13`, and its accepted application code remains `5947624`.

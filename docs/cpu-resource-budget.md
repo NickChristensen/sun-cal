@@ -1,6 +1,12 @@
 # QA resource budget
 
-This budget applies to the synthetic CPU experiments. The production Worker remains unchanged. Its production bindings are never attached to a QA Worker.
+This budget applies to the synthetic CPU experiments. These benchmark phases did not change production. Production bindings were never attached to a QA Worker.
+
+## Release phase, November 1, 2026
+
+Remote QA benchmarking and telemetry remain on hold. New November 1 QA use remains at 1,008 requests, three uploads, and 23 telemetry queries. The estimated cost bound remains $0.00893554. A dense query scanned 594,312,158 bytes, above the 536,870,912-byte stop. No new QA requests, uploads, telemetry queries, budget reset, or budget extension are authorized.
+
+The user authorized one production release after final review and checks clear, with one bounded safe smoke for release verification. Record production release evidence separately from the QA ledger below.
 
 ## Resumed fold-search phase, November 1, 2026
 

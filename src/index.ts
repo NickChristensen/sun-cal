@@ -291,7 +291,11 @@ function buildSunEvents(
     // SunCalc selects the nearest solar cycle. Approximate local solar noon
     // selects this intended day even at +/-180 longitude; UTC noon alone can
     // select the adjacent day. UIDs continue to use the intended UTC date.
-    const solarAnchor = new Date(currentDayMs + solarNoonMs);
+    let solarAnchor = new Date(currentDayMs + solarNoonMs);
+    if (Number.isNaN(solarAnchor.valueOf())) {
+      solarAnchor = calendarDay.plus({ days: offset })
+        .plus({ hours: 12 - longitude / 15 }).toJSDate();
+    }
     const currentDate = new Date(currentDayMs);
     const times = SunCalc.getTimes(solarAnchor, latitude, longitude, height);
 
